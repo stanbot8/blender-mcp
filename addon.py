@@ -483,6 +483,32 @@ class BlenderMCPServer:
             return {"error": str(e)}
 
     def download_polyhaven_asset(self, asset_id, asset_type, resolution="1k", file_format=None):
+        """
+        Download a Poly Haven asset (HDRI, texture set, or 3D model) and import or create corresponding Blender data.
+        
+        This function fetches file metadata for the given asset_id from the Poly Haven API, downloads the requested files at the specified resolution and format, and then:
+        - For "hdris": creates or updates the scene world and sets an environment texture.
+        - For "textures": loads images, packs them into the .blend file, creates a new principled material with connected texture nodes, and returns the material name and available maps.
+        - For "models": downloads the model and any included dependency files to a temporary directory and imports the model into the scene (supports glTF/GLB, FBX, OBJ, and .blend assets).
+        
+        Parameters:
+            asset_id (str): The Poly Haven asset identifier.
+            asset_type (str): One of "hdris", "textures", or "models" indicating which asset category to download.
+            resolution (str): Desired resolution key (e.g., "1k", "2k"); used to select files from the asset metadata. Default is "1k".
+            file_format (str | None): Preferred file extension/format for the downloaded file (e.g., "hdr", "exr", "jpg", "gltf"); if None a sensible default per asset_type is used.
+        
+        Returns:
+            dict: On success, contains "success": True and type-specific fields:
+                - HDRIs: "message" and "image_name" (name of the loaded environment image).
+                - Textures: "message", "material" (material name), and "maps" (list of map types imported).
+                - Models: "message" and "imported_objects" (list of imported object names).
+              On failure, contains "error" with a descriptive message.
+        
+        Side effects:
+            - Downloads files to temporary locations and may write temporary files/directories.
+            - Modifies Blender data: creates or modifies worlds, images, materials, and imports objects.
+            - Packs images into the .blend file when importing textures.
+        """
         try:
             # First get the files information
             files_response = requests.get(f"https://api.polyhaven.com/files/{asset_id}", headers=REQ_HEADERS)
@@ -603,7 +629,34 @@ class BlenderMCPServer:
                                     # Download the file
                                     response = requests.get(file_url, headers=REQ_HEADERS)
                                     if response.status_code == 200:
-                                        tmp_file.write(response.content)
+                                        # Verify file integrity with checksum
+                                        content = response.content
+                                        
+                                        # Check if integrity verification metadata is available
+                                        if 'checksum' in file_info and 'algorithm' in file_info:
+                                            import hashlib
+                                            algorithm = file_info['algorithm']
+                                            expected_checksum = file_info['checksum']
+                                            
+                                            # Compute actual checksum
+                                            try:
+                                                hash_obj = hashlib.new(algorithm)
+                                                hash_obj.update(content)
+                                                actual_checksum = hash_obj.hexdigest()
+                                                
+                                                # Verify checksum matches
+                                                if actual_checksum != expected_checksum:
+                                                    raise ValueError(f"Integrity check failed for {map_type}: checksum mismatch (expected: {expected_checksum}, got: {actual_checksum})")
+                                            except ValueError as e:
+                                                raise e
+                                            except Exception as e:
+                                                raise ValueError(f"Failed to verify file integrity: {str(e)}")
+                                        else:
+                                            # Log warning if no checksum available (optional: could make this mandatory)
+                                            import logging
+                                            logging.warning(f"No integrity checksum available for {map_type} - proceeding without verification. Consider adding checksum validation for enhanced security.")
+                                        
+                                        tmp_file.write(content)
                                         tmp_path = tmp_file.name
 
                                         # Load image from temporary file
