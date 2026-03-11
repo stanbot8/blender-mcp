@@ -1785,6 +1785,91 @@ def rigging_strategy() -> str:
     - Bone envelopes define a distance-based influence volume around each bone;
       vertex groups override envelopes for fine control
     - Use get_armature_info() to verify the rig hierarchy after major changes
+
+    8. Exporting to Unreal Engine (Blender → UE differences)
+
+        Coordinate systems:
+        - Blender: right-handed, Z-up, Y-forward (front view looks along +Y)
+        - Unreal: left-handed, Z-up, X-forward
+        - The Y-axis effectively flips between them. FBX handles this automatically
+          with correct export settings, but be aware of it.
+
+        Units & Scale:
+        - Blender defaults to meters (1 unit = 1m)
+        - Unreal defaults to centimeters (1 unit = 1cm)
+        - Factor of 100x difference. Set Blender scene units to Centimeters
+          but keep Unit Scale at 1.0 (do NOT change Unit Scale).
+        - If bones appear tiny in UE physics assets, temporarily scale armature+mesh
+          100x in Blender, apply transforms, export, then scale back.
+
+        Bone naming (Blender → UE mannequin convention):
+        - Blender uses .L/.R suffixes: "UpperArm.L", "Hand.R"
+        - UE uses _l/_r suffixes, lowercase, underscores: "upperarm_l", "hand_r"
+        - Conversion rules: CamelCase→lowercase, dots→underscores, .L→_l, .R→_r
+
+        UE5 Mannequin skeleton (89 bones) — standard hierarchy:
+          root → pelvis
+            pelvis → spine_01 → spine_02 → spine_03 → spine_04 → spine_05
+              spine_05 → neck_01 → neck_02 → head
+              spine_05 → clavicle_l → upperarm_l → lowerarm_l → hand_l
+                hand_l → index_01_l/middle_01_l/ring_01_l/pinky_01_l/thumb_01_l
+                  (each finger: _01 → _02 → _03)
+              spine_05 → clavicle_r → upperarm_r → lowerarm_r → hand_r
+                (same finger structure with _r)
+            pelvis → thigh_l → calf_l → foot_l → ball_l
+            pelvis → thigh_r → calf_r → foot_r → ball_r
+            (+ IK bones: ik_foot_root, ik_foot_l, ik_foot_r, ik_hand_root,
+              ik_hand_gun, ik_hand_l, ik_hand_r)
+
+        Blender bone name → UE mannequin name mapping:
+          Hips → pelvis              Spine → spine_01
+          Spine.001 → spine_02       Spine.002 → spine_03
+          Chest → spine_04           Chest.001 → spine_05
+          Neck → neck_01             Neck.001 → neck_02
+          Head → head
+          Shoulder.L → clavicle_l    Shoulder.R → clavicle_r
+          UpperArm.L → upperarm_l    UpperArm.R → upperarm_r
+          Forearm.L → lowerarm_l     Forearm.R → lowerarm_r
+          Hand.L → hand_l            Hand.R → hand_r
+          UpperLeg.L → thigh_l       UpperLeg.R → thigh_r
+          LowerLeg.L → calf_l        LowerLeg.R → calf_r
+          Foot.L → foot_l            Foot.R → foot_r
+          Toe.L → ball_l             Toe.R → ball_r
+
+        FBX Export settings (critical):
+        - Uncheck "Add Leaf Bones" — adds useless extra bones at chain ends
+        - Check "Only Deform Bones" — excludes control/mechanism bones
+        - Turn off "Bake Animation" if exporting mesh only
+        - Set Smoothing to "Edge" (avoids UE import warnings)
+        - Object Types: select only Armature + Mesh
+        - Primary Bone Axis: Y, Secondary Bone Axis: X (defaults)
+        - Apply Scalings: "FBX All"
+
+        UE Import settings:
+        - Select "Import Normals" (not "Compute") to preserve hard edges
+        - The armature object named "Armature" is auto-removed by UE as a root bone.
+          If you want to keep it, rename it to "root" in Blender.
+
+        Common problems:
+        - Mesh rotated 90° in UE → apply rotation in Blender before export (Ctrl+A)
+        - Bones too small for physics asset → scale workaround (100x up, apply, export)
+        - Extra root bone → delete the empty "Armature" node or rename it
+        - Animation scale drift → ensure armature name matches between mesh and anim exports
+        - Leaf bones cluttering skeleton → always disable "Add Leaf Bones"
+
+        Spine count differences:
+        - UE4 mannequin: 4 spine + 1 neck
+        - UE5 mannequin: 5 spine + 2 neck
+        - When building for UE, match the target skeleton's spine/neck count
+
+        Bone orientation difference:
+        - Blender bones have a visible head→tail with Y-axis along the shaft
+        - UE bones are single points; shafts drawn between parent and child
+        - Blender forces all bones to orient Y-axis toward tail
+        - UE/Maya/FBX allow arbitrary bone orientation (e.g., UE mannequin legs
+          point -X on left, +X on right)
+        - This mismatch is handled by the FBX exporter, but building the rig
+          in Blender with correct hierarchy ensures clean import
     """
 
 # Main execution
