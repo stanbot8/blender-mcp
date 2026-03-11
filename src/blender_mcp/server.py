@@ -346,6 +346,32 @@ def execute_blender_code(ctx: Context, code: str) -> str:
         logger.error(f"Error executing code: {str(e)}")
         return f"Error executing code: {str(e)}"
 
+@telemetry_tool("get_mesh_analysis")
+@mcp.tool()
+def get_mesh_analysis(ctx: Context, mesh_name: str, num_slices: int = 5) -> str:
+    """
+    Analyze a mesh to determine where to place bones for rigging.
+    Returns bounding box, center of mass, cross-section data along the Z axis,
+    symmetry detection, and mesh islands (disconnected components like eyes, teeth,
+    clothing, accessories). Use this before creating an armature to understand
+    the mesh's shape, proportions, and separate parts.
+
+    Parameters:
+    - mesh_name: Name of the mesh object to analyze
+    - num_slices: Number of horizontal slices to analyze along Z axis (default: 5).
+                  More slices = more detail about how the mesh's width/depth varies with height.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("get_mesh_analysis", {
+            "mesh_name": mesh_name,
+            "num_slices": num_slices,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error analyzing mesh: {str(e)}")
+        return f"Error analyzing mesh: {str(e)}"
+
 @telemetry_tool("get_polyhaven_categories")
 @mcp.tool()
 def get_polyhaven_categories(ctx: Context, asset_type: str = "hdris") -> str:

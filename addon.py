@@ -213,6 +213,8 @@ class BlenderMCPServer:
             "get_hyper3d_status": self.get_hyper3d_status,
             "get_sketchfab_status": self.get_sketchfab_status,
             "get_hunyuan3d_status": self.get_hunyuan3d_status,
+            # Mesh analysis & rigging handlers
+            "get_mesh_analysis": self.get_mesh_analysis,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -359,6 +361,24 @@ class BlenderMCPServer:
                 "polygons": len(mesh.polygons),
             }
 
+        # Add armature data if applicable
+        if obj.type == 'ARMATURE' and obj.data:
+            armature = obj.data
+            bone_list = []
+            for bone in armature.bones:
+                bone_list.append({
+                    "name": bone.name,
+                    "head": [round(bone.head_local[i], 4) for i in range(3)],
+                    "tail": [round(bone.tail_local[i], 4) for i in range(3)],
+                    "parent": bone.parent.name if bone.parent else None,
+                    "children": [c.name for c in bone.children],
+                    "connected": bone.use_connect,
+                })
+            obj_info["armature"] = {
+                "bone_count": len(armature.bones),
+                "bones": bone_list,
+            }
+
         return obj_info
 
     def get_viewport_screenshot(self, max_size=800, filepath=None, format="png"):
@@ -435,7 +455,871 @@ class BlenderMCPServer:
         except Exception as e:
             raise Exception(f"Code execution error: {str(e)}")
 
+    def get_mesh_analysis(self, mesh_name, num_slices=5):
+        """Analyze mesh geometry to help determine bone placement.
+        Returns bounding box, center of mass, cross-section info, and mesh islands."""
+        try:
+            obj = bpy.data.objects.get(mesh_name)
+            if not obj or obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
 
+            mesh = obj.data
+            world_matrix = obj.matrix_world
+
+            # Get all vertex positions in world space
+            verts_world = [world_matrix @ v.co for v in mesh.vertices]
+            if not verts_world:
+                raise ValueError("Mesh has no vertices")
+
+            xs = [v.x for v in verts_world]
+            ys = [v.y for v in verts_world]
+            zs = [v.z for v in verts_world]
+
+            bbox_min = [min(xs), min(ys), min(zs)]
+            bbox_max = [max(xs), max(ys), max(zs)]
+            dimensions = [bbox_max[i] - bbox_min[i] for i in range(3)]
+
+            # Center of mass (average vertex position)
+            n = len(verts_world)
+            center = [sum(xs) / n, sum(ys) / n, sum(zs) / n]
+
+            # Cross-section analysis along Z axis (height slices)
+            # This helps determine where to place spine/limb bones
+            z_slices = []
+            z_range = bbox_max[2] - bbox_min[2]
+            if z_range > 0 and num_slices > 0:
+                for i in range(num_slices):
+                    t = (i + 0.5) / num_slices
+                    z_level = bbox_min[2] + t * z_range
+                    z_tolerance = z_range / num_slices / 2
+
+                    # Find vertices near this Z level
+                    slice_verts = [v for v in verts_world
+                                   if abs(v.z - z_level) < z_tolerance]
+                    if slice_verts:
+                        sx = [v.x for v in slice_verts]
+                        sy = [v.y for v in slice_verts]
+                        slice_center = [sum(sx) / len(sx), sum(sy) / len(sx), z_level]
+                        slice_width = max(sx) - min(sx)
+                        slice_depth = max(sy) - min(sy)
+                        z_slices.append({
+                            "z": round(z_level, 4),
+                            "center_x": round(slice_center[0], 4),
+                            "center_y": round(slice_center[1], 4),
+                            "width": round(slice_width, 4),
+                            "depth": round(slice_depth, 4),
+                            "vertex_count": len(slice_verts),
+                        })
+
+            # Detect likely symmetry
+            x_center_offset = abs(center[0] - (bbox_min[0] + bbox_max[0]) / 2)
+            is_likely_symmetric = x_center_offset < dimensions[0] * 0.05 if dimensions[0] > 0 else True
+
+            # ---- Mesh island detection via union-find ----
+            vert_count = len(mesh.vertices)
+            parent = list(range(vert_count))
+
+            def find(x):
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+
+            for edge in mesh.edges:
+                union(edge.vertices[0], edge.vertices[1])
+
+            # Group vertices by their root
+            from collections import defaultdict
+            island_verts = defaultdict(list)
+            for vi in range(vert_count):
+                island_verts[find(vi)].append(vi)
+
+            # Build island info sorted by vertex count (largest first)
+            islands = []
+            for root, vert_indices in sorted(island_verts.items(),
+                                              key=lambda item: len(item[1]),
+                                              reverse=True):
+                island_ws = [verts_world[vi] for vi in vert_indices]
+                ixs = [v.x for v in island_ws]
+                iys = [v.y for v in island_ws]
+                izs = [v.z for v in island_ws]
+                ic = [sum(ixs) / len(ixs), sum(iys) / len(iys), sum(izs) / len(izs)]
+                i_bbox_min = [min(ixs), min(iys), min(izs)]
+                i_bbox_max = [max(ixs), max(iys), max(izs)]
+                i_dims = [i_bbox_max[j] - i_bbox_min[j] for j in range(3)]
+
+                islands.append({
+                    "vertex_count": len(vert_indices),
+                    "center": [round(v, 4) for v in ic],
+                    "bbox_min": [round(v, 4) for v in i_bbox_min],
+                    "bbox_max": [round(v, 4) for v in i_bbox_max],
+                    "dimensions": [round(v, 4) for v in i_dims],
+                })
+
+            return {
+                "mesh_name": obj.name,
+                "vertex_count": len(mesh.vertices),
+                "bbox_min": [round(v, 4) for v in bbox_min],
+                "bbox_max": [round(v, 4) for v in bbox_max],
+                "dimensions": [round(v, 4) for v in dimensions],
+                "center": [round(v, 4) for v in center],
+                "z_slices": z_slices,
+                "likely_symmetric": is_likely_symmetric,
+                "island_count": len(islands),
+                "islands": islands[:30],  # Limit output for large meshes
+            }
+        except Exception as e:
+            raise Exception(f"Error analyzing mesh: {str(e)}")
+
+    # ==================== Rigging Tools ====================
+
+    def create_armature(self, name="Armature", location=None):
+        """Create a new armature object with a single root bone"""
+        try:
+            loc = location or [0, 0, 0]
+            armature_data = bpy.data.armatures.new(name)
+            armature_obj = bpy.data.objects.new(name, armature_data)
+            bpy.context.collection.objects.link(armature_obj)
+            armature_obj.location = mathutils.Vector(loc)
+
+            # Enter edit mode to add root bone
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            root_bone = armature_data.edit_bones.new("Root")
+            root_bone.head = (0, 0, 0)
+            root_bone.tail = (0, 0, 0.5)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "armature_name": armature_obj.name,
+                "bone_count": len(armature_data.bones),
+                "root_bone": "Root"
+            }
+        except Exception as e:
+            # Make sure we return to object mode on error
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error creating armature: {str(e)}")
+
+    def add_bone(self, armature_name, bone_name, head, tail, parent_bone=None, connected=False, roll=0.0):
+        """Add a bone to an existing armature"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            armature_data = armature_obj.data
+            new_bone = armature_data.edit_bones.new(bone_name)
+            new_bone.head = mathutils.Vector(head)
+            new_bone.tail = mathutils.Vector(tail)
+            new_bone.roll = roll
+
+            if parent_bone:
+                parent = armature_data.edit_bones.get(parent_bone)
+                if parent:
+                    new_bone.parent = parent
+                    new_bone.use_connect = connected
+                else:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    raise ValueError(f"Parent bone not found: {parent_bone}")
+
+            actual_name = new_bone.name  # Blender may rename if duplicate
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "bone_name": actual_name,
+                "armature_name": armature_obj.name,
+                "head": list(head),
+                "tail": list(tail),
+                "parent": parent_bone
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error adding bone: {str(e)}")
+
+    def add_bone_chain(self, armature_name, chain_name, start, direction, count, bone_length, parent_bone=None):
+        """Add a chain of connected bones (useful for spines, limbs, tails, etc.)"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            armature_data = armature_obj.data
+            dir_vec = mathutils.Vector(direction).normalized() * bone_length
+            current_head = mathutils.Vector(start)
+            bone_names = []
+            prev_bone = None
+
+            if parent_bone:
+                prev_bone = armature_data.edit_bones.get(parent_bone)
+                if not prev_bone:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    raise ValueError(f"Parent bone not found: {parent_bone}")
+
+            for i in range(count):
+                bone_name = f"{chain_name}_{i+1:02d}"
+                bone = armature_data.edit_bones.new(bone_name)
+                bone.head = current_head.copy()
+                bone.tail = current_head + dir_vec
+
+                if prev_bone:
+                    bone.parent = prev_bone
+                    if i > 0 or (parent_bone and prev_bone.tail == bone.head):
+                        bone.use_connect = True
+
+                bone_names.append(bone.name)
+                current_head = bone.tail.copy()
+                prev_bone = bone
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "armature_name": armature_obj.name,
+                "chain_bones": bone_names,
+                "count": len(bone_names)
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error creating bone chain: {str(e)}")
+
+    def edit_bone(self, armature_name, bone_name, head=None, tail=None, roll=None,
+                  parent_bone=None, use_connect=None, envelope_distance=None,
+                  use_deform=None):
+        """Edit properties of an existing bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            bone = armature_obj.data.edit_bones.get(bone_name)
+            if not bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            if head is not None:
+                bone.head = mathutils.Vector(head)
+            if tail is not None:
+                bone.tail = mathutils.Vector(tail)
+            if roll is not None:
+                bone.roll = roll
+            if parent_bone is not None:
+                if parent_bone == "":
+                    bone.parent = None
+                else:
+                    parent = armature_obj.data.edit_bones.get(parent_bone)
+                    if parent:
+                        bone.parent = parent
+                    else:
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                        raise ValueError(f"Parent bone not found: {parent_bone}")
+            if use_connect is not None:
+                bone.use_connect = use_connect
+            if envelope_distance is not None:
+                bone.envelope_distance = envelope_distance
+            if use_deform is not None:
+                bone.use_deform = use_deform
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "bone_name": bone_name,
+                "armature_name": armature_name,
+                "updated": True
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error editing bone: {str(e)}")
+
+    def remove_bone(self, armature_name, bone_name):
+        """Remove a bone from an armature"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            bone = armature_obj.data.edit_bones.get(bone_name)
+            if not bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            armature_obj.data.edit_bones.remove(bone)
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "removed": bone_name,
+                "armature_name": armature_name,
+                "remaining_bones": len(armature_obj.data.bones)
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error removing bone: {str(e)}")
+
+    def get_armature_info(self, armature_name):
+        """Get detailed information about an armature and all its bones"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            armature_data = armature_obj.data
+            bones_info = []
+
+            for bone in armature_data.bones:
+                bone_info = {
+                    "name": bone.name,
+                    "head": [round(bone.head_local[i], 4) for i in range(3)],
+                    "tail": [round(bone.tail_local[i], 4) for i in range(3)],
+                    "length": round(bone.length, 4),
+                    "parent": bone.parent.name if bone.parent else None,
+                    "children": [c.name for c in bone.children],
+                    "connected": bone.use_connect,
+                    "use_deform": bone.use_deform,
+                }
+                bones_info.append(bone_info)
+
+            # Get constraints info from pose bones
+            constraints_info = []
+            if armature_obj.pose:
+                for pbone in armature_obj.pose.bones:
+                    for c in pbone.constraints:
+                        constraints_info.append({
+                            "bone": pbone.name,
+                            "type": c.type,
+                            "name": c.name,
+                            "enabled": not c.mute,
+                        })
+
+            # Get parented meshes
+            parented_meshes = [
+                child.name for child in armature_obj.children
+                if child.type == 'MESH'
+            ]
+
+            return {
+                "name": armature_obj.name,
+                "location": [round(armature_obj.location[i], 4) for i in range(3)],
+                "bone_count": len(armature_data.bones),
+                "bones": bones_info,
+                "constraints": constraints_info,
+                "parented_meshes": parented_meshes,
+            }
+        except Exception as e:
+            raise Exception(f"Error getting armature info: {str(e)}")
+
+    def parent_mesh_to_armature(self, mesh_name, armature_name, parent_type="ARMATURE_AUTO"):
+        """Parent a mesh to an armature with automatic weights or other methods"""
+        try:
+            mesh_obj = bpy.data.objects.get(mesh_name)
+            if not mesh_obj or mesh_obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            # Deselect all, then select mesh and armature
+            bpy.ops.object.select_all(action='DESELECT')
+            mesh_obj.select_set(True)
+            armature_obj.select_set(True)
+            bpy.context.view_layer.objects.active = armature_obj
+
+            # Parent with automatic weights or other type
+            valid_types = ["ARMATURE_AUTO", "ARMATURE_NAME", "ARMATURE_ENVELOPE", "OBJECT"]
+            if parent_type not in valid_types:
+                raise ValueError(f"Invalid parent type: {parent_type}. Must be one of: {valid_types}")
+
+            if parent_type == "OBJECT":
+                bpy.ops.object.parent_set(type='OBJECT')
+            else:
+                bpy.ops.object.parent_set(type=parent_type)
+
+            # Check if armature modifier was added
+            has_modifier = any(
+                mod.type == 'ARMATURE' for mod in mesh_obj.modifiers
+            )
+
+            # Get vertex groups created
+            vertex_groups = [vg.name for vg in mesh_obj.vertex_groups]
+
+            return {
+                "mesh": mesh_obj.name,
+                "armature": armature_obj.name,
+                "parent_type": parent_type,
+                "has_armature_modifier": has_modifier,
+                "vertex_groups_count": len(vertex_groups),
+                "vertex_groups": vertex_groups[:20],  # Limit output
+            }
+        except Exception as e:
+            raise Exception(f"Error parenting mesh to armature: {str(e)}")
+
+    def add_bone_constraint(self, armature_name, bone_name, constraint_type, properties=None):
+        """Add a constraint to a pose bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            pose_bone = armature_obj.pose.bones.get(bone_name)
+            if not pose_bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            # Map friendly names to Blender constraint types
+            constraint_map = {
+                "IK": "IK",
+                "INVERSE_KINEMATICS": "IK",
+                "COPY_LOCATION": "COPY_LOCATION",
+                "COPY_ROTATION": "COPY_ROTATION",
+                "COPY_SCALE": "COPY_SCALE",
+                "COPY_TRANSFORMS": "COPY_TRANSFORMS",
+                "LIMIT_LOCATION": "LIMIT_LOCATION",
+                "LIMIT_ROTATION": "LIMIT_ROTATION",
+                "LIMIT_SCALE": "LIMIT_SCALE",
+                "TRACK_TO": "TRACK_TO",
+                "DAMPED_TRACK": "DAMPED_TRACK",
+                "LOCKED_TRACK": "LOCKED_TRACK",
+                "STRETCH_TO": "STRETCH_TO",
+                "FLOOR": "FLOOR",
+                "CLAMP_TO": "CLAMP_TO",
+                "TRANSFORMATION": "TRANSFORMATION",
+            }
+
+            ctype = constraint_map.get(constraint_type.upper(), constraint_type.upper())
+            constraint = pose_bone.constraints.new(type=ctype)
+
+            # Apply properties
+            props = properties or {}
+            for key, value in props.items():
+                if key == "target":
+                    target_obj = bpy.data.objects.get(value)
+                    if target_obj:
+                        constraint.target = target_obj
+                elif key == "subtarget":
+                    constraint.subtarget = value
+                elif key == "pole_target":
+                    pole_obj = bpy.data.objects.get(value)
+                    if pole_obj:
+                        constraint.pole_target = pole_obj
+                elif key == "pole_subtarget":
+                    constraint.pole_subtarget = value
+                elif key == "pole_angle":
+                    constraint.pole_angle = value
+                elif key == "chain_count":
+                    constraint.chain_count = value
+                elif key == "use_tail" and hasattr(constraint, 'use_tail'):
+                    constraint.use_tail = value
+                elif key == "use_stretch" and hasattr(constraint, 'use_stretch'):
+                    constraint.use_stretch = value
+                elif key == "influence":
+                    constraint.influence = value
+                elif key == "name":
+                    constraint.name = value
+                elif hasattr(constraint, key):
+                    setattr(constraint, key, value)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "constraint_name": constraint.name,
+                "constraint_type": ctype,
+                "bone": bone_name,
+                "armature": armature_name,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error adding constraint: {str(e)}")
+
+    def remove_bone_constraint(self, armature_name, bone_name, constraint_name):
+        """Remove a constraint from a pose bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            pose_bone = armature_obj.pose.bones.get(bone_name)
+            if not pose_bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            constraint = pose_bone.constraints.get(constraint_name)
+            if not constraint:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Constraint not found: {constraint_name}")
+
+            pose_bone.constraints.remove(constraint)
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "removed": constraint_name,
+                "bone": bone_name,
+                "armature": armature_name,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error removing constraint: {str(e)}")
+
+    def set_bone_pose(self, armature_name, bone_name, location=None, rotation_euler=None,
+                      rotation_quaternion=None, scale=None):
+        """Set the pose transform of a bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            pose_bone = armature_obj.pose.bones.get(bone_name)
+            if not pose_bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            if location is not None:
+                pose_bone.location = mathutils.Vector(location)
+            if rotation_euler is not None:
+                pose_bone.rotation_mode = 'XYZ'
+                pose_bone.rotation_euler = mathutils.Euler(rotation_euler)
+            if rotation_quaternion is not None:
+                pose_bone.rotation_mode = 'QUATERNION'
+                pose_bone.rotation_quaternion = mathutils.Quaternion(rotation_quaternion)
+            if scale is not None:
+                pose_bone.scale = mathutils.Vector(scale)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "bone": bone_name,
+                "armature": armature_name,
+                "posed": True
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error setting bone pose: {str(e)}")
+
+    def reset_pose(self, armature_name, bone_names=None):
+        """Reset pose of all or specific bones to rest position"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            reset_bones = []
+            bones_to_reset = bone_names or [b.name for b in armature_obj.pose.bones]
+
+            for bname in bones_to_reset:
+                pose_bone = armature_obj.pose.bones.get(bname)
+                if pose_bone:
+                    pose_bone.location = (0, 0, 0)
+                    pose_bone.rotation_quaternion = (1, 0, 0, 0)
+                    pose_bone.rotation_euler = (0, 0, 0)
+                    pose_bone.scale = (1, 1, 1)
+                    reset_bones.append(bname)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "armature": armature_name,
+                "reset_bones": reset_bones,
+                "count": len(reset_bones)
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error resetting pose: {str(e)}")
+
+    def manage_vertex_groups(self, mesh_name, action, vertex_group_name, vertex_indices=None, weight=1.0):
+        """Create, remove, or assign weights to vertex groups"""
+        try:
+            mesh_obj = bpy.data.objects.get(mesh_name)
+            if not mesh_obj or mesh_obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            if action == "create":
+                vg = mesh_obj.vertex_groups.new(name=vertex_group_name)
+                return {
+                    "action": "created",
+                    "vertex_group": vg.name,
+                    "mesh": mesh_name
+                }
+
+            elif action == "remove":
+                vg = mesh_obj.vertex_groups.get(vertex_group_name)
+                if not vg:
+                    raise ValueError(f"Vertex group not found: {vertex_group_name}")
+                mesh_obj.vertex_groups.remove(vg)
+                return {
+                    "action": "removed",
+                    "vertex_group": vertex_group_name,
+                    "mesh": mesh_name
+                }
+
+            elif action == "assign":
+                vg = mesh_obj.vertex_groups.get(vertex_group_name)
+                if not vg:
+                    vg = mesh_obj.vertex_groups.new(name=vertex_group_name)
+                if vertex_indices:
+                    vg.add(vertex_indices, weight, 'REPLACE')
+                return {
+                    "action": "assigned",
+                    "vertex_group": vg.name,
+                    "mesh": mesh_name,
+                    "vertex_count": len(vertex_indices) if vertex_indices else 0,
+                    "weight": weight
+                }
+
+            elif action == "list":
+                groups = [{"name": vg.name, "index": vg.index} for vg in mesh_obj.vertex_groups]
+                return {
+                    "action": "list",
+                    "mesh": mesh_name,
+                    "vertex_groups": groups,
+                    "count": len(groups)
+                }
+
+            else:
+                raise ValueError(f"Unknown action: {action}. Must be create, remove, assign, or list")
+
+        except Exception as e:
+            raise Exception(f"Error managing vertex groups: {str(e)}")
+
+    def setup_ik(self, armature_name, bone_name, chain_count=0, target_bone=None,
+                 pole_bone=None, pole_angle=0.0, use_stretch=False):
+        """Convenience method to set up IK on a bone with common settings"""
+        try:
+            props = {
+                "target": armature_name,
+                "chain_count": chain_count,
+                "use_stretch": use_stretch,
+            }
+
+            if target_bone:
+                props["subtarget"] = target_bone
+            if pole_bone:
+                props["pole_target"] = armature_name
+                props["pole_subtarget"] = pole_bone
+                props["pole_angle"] = pole_angle
+
+            return self.add_bone_constraint(
+                armature_name=armature_name,
+                bone_name=bone_name,
+                constraint_type="IK",
+                properties=props
+            )
+        except Exception as e:
+            raise Exception(f"Error setting up IK: {str(e)}")
+
+    def create_humanoid_rig(self, name="Humanoid", location=None, height=1.8):
+        """Create a basic humanoid armature with standard bone hierarchy"""
+        try:
+            loc = location or [0, 0, 0]
+            scale = height / 1.8  # Scale relative to default 1.8m height
+
+            armature_data = bpy.data.armatures.new(name)
+            armature_obj = bpy.data.objects.new(name, armature_data)
+            bpy.context.collection.objects.link(armature_obj)
+            armature_obj.location = mathutils.Vector(loc)
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            s = scale  # shorthand
+            bones = armature_data.edit_bones
+
+            # Spine
+            hips = bones.new("Hips")
+            hips.head = (0, 0, 0.95 * s)
+            hips.tail = (0, 0, 1.05 * s)
+
+            spine = bones.new("Spine")
+            spine.head = hips.tail.copy()
+            spine.tail = (0, 0, 1.2 * s)
+            spine.parent = hips
+            spine.use_connect = True
+
+            chest = bones.new("Chest")
+            chest.head = spine.tail.copy()
+            chest.tail = (0, 0, 1.4 * s)
+            chest.parent = spine
+            chest.use_connect = True
+
+            neck = bones.new("Neck")
+            neck.head = chest.tail.copy()
+            neck.tail = (0, 0, 1.55 * s)
+            neck.parent = chest
+            neck.use_connect = True
+
+            head = bones.new("Head")
+            head.head = neck.tail.copy()
+            head.tail = (0, 0, 1.75 * s)
+            head.parent = neck
+            head.use_connect = True
+
+            # Left arm
+            shoulder_l = bones.new("Shoulder.L")
+            shoulder_l.head = (0.05 * s, 0, 1.38 * s)
+            shoulder_l.tail = (0.18 * s, 0, 1.38 * s)
+            shoulder_l.parent = chest
+
+            upper_arm_l = bones.new("UpperArm.L")
+            upper_arm_l.head = shoulder_l.tail.copy()
+            upper_arm_l.tail = (0.45 * s, 0, 1.38 * s)
+            upper_arm_l.parent = shoulder_l
+            upper_arm_l.use_connect = True
+
+            forearm_l = bones.new("Forearm.L")
+            forearm_l.head = upper_arm_l.tail.copy()
+            forearm_l.tail = (0.68 * s, 0, 1.38 * s)
+            forearm_l.parent = upper_arm_l
+            forearm_l.use_connect = True
+
+            hand_l = bones.new("Hand.L")
+            hand_l.head = forearm_l.tail.copy()
+            hand_l.tail = (0.78 * s, 0, 1.38 * s)
+            hand_l.parent = forearm_l
+            hand_l.use_connect = True
+
+            # Right arm
+            shoulder_r = bones.new("Shoulder.R")
+            shoulder_r.head = (-0.05 * s, 0, 1.38 * s)
+            shoulder_r.tail = (-0.18 * s, 0, 1.38 * s)
+            shoulder_r.parent = chest
+
+            upper_arm_r = bones.new("UpperArm.R")
+            upper_arm_r.head = shoulder_r.tail.copy()
+            upper_arm_r.tail = (-0.45 * s, 0, 1.38 * s)
+            upper_arm_r.parent = shoulder_r
+            upper_arm_r.use_connect = True
+
+            forearm_r = bones.new("Forearm.R")
+            forearm_r.head = upper_arm_r.tail.copy()
+            forearm_r.tail = (-0.68 * s, 0, 1.38 * s)
+            forearm_r.parent = upper_arm_r
+            forearm_r.use_connect = True
+
+            hand_r = bones.new("Hand.R")
+            hand_r.head = forearm_r.tail.copy()
+            hand_r.tail = (-0.78 * s, 0, 1.38 * s)
+            hand_r.parent = forearm_r
+            hand_r.use_connect = True
+
+            # Left leg
+            upper_leg_l = bones.new("UpperLeg.L")
+            upper_leg_l.head = (0.1 * s, 0, 0.93 * s)
+            upper_leg_l.tail = (0.1 * s, 0, 0.5 * s)
+            upper_leg_l.parent = hips
+
+            lower_leg_l = bones.new("LowerLeg.L")
+            lower_leg_l.head = upper_leg_l.tail.copy()
+            lower_leg_l.tail = (0.1 * s, 0, 0.08 * s)
+            lower_leg_l.parent = upper_leg_l
+            lower_leg_l.use_connect = True
+
+            foot_l = bones.new("Foot.L")
+            foot_l.head = lower_leg_l.tail.copy()
+            foot_l.tail = (0.1 * s, -0.12 * s, 0.0)
+            foot_l.parent = lower_leg_l
+            foot_l.use_connect = True
+
+            toe_l = bones.new("Toe.L")
+            toe_l.head = foot_l.tail.copy()
+            toe_l.tail = (0.1 * s, -0.2 * s, 0.0)
+            toe_l.parent = foot_l
+            toe_l.use_connect = True
+
+            # Right leg
+            upper_leg_r = bones.new("UpperLeg.R")
+            upper_leg_r.head = (-0.1 * s, 0, 0.93 * s)
+            upper_leg_r.tail = (-0.1 * s, 0, 0.5 * s)
+            upper_leg_r.parent = hips
+
+            lower_leg_r = bones.new("LowerLeg.R")
+            lower_leg_r.head = upper_leg_r.tail.copy()
+            lower_leg_r.tail = (-0.1 * s, 0, 0.08 * s)
+            lower_leg_r.parent = upper_leg_r
+            lower_leg_r.use_connect = True
+
+            foot_r = bones.new("Foot.R")
+            foot_r.head = lower_leg_r.tail.copy()
+            foot_r.tail = (-0.1 * s, -0.12 * s, 0.0)
+            foot_r.parent = lower_leg_r
+            foot_r.use_connect = True
+
+            toe_r = bones.new("Toe.R")
+            toe_r.head = foot_r.tail.copy()
+            toe_r.tail = (-0.1 * s, -0.2 * s, 0.0)
+            toe_r.parent = foot_r
+            toe_r.use_connect = True
+
+            bone_names = [b.name for b in bones]
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "armature_name": armature_obj.name,
+                "bone_count": len(bone_names),
+                "bones": bone_names,
+                "height": height,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error creating humanoid rig: {str(e)}")
+
+    # ==================== End Rigging Tools ====================
 
     def get_polyhaven_categories(self, asset_type):
         """Get categories for a specific asset type from Polyhaven"""
