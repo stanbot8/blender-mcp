@@ -228,6 +228,7 @@ class BlenderMCPServer:
             "reset_pose": self.reset_pose,
             "manage_vertex_groups": self.manage_vertex_groups,
             "setup_ik": self.setup_ik,
+            "create_humanoid_rig": self.create_humanoid_rig,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -1174,6 +1175,165 @@ class BlenderMCPServer:
         except Exception as e:
             raise Exception(f"Error setting up IK: {str(e)}")
 
+    def create_humanoid_rig(self, name="Humanoid", location=None, height=1.8):
+        """Create a basic humanoid armature with standard bone hierarchy"""
+        try:
+            loc = location or [0, 0, 0]
+            scale = height / 1.8  # Scale relative to default 1.8m height
+
+            armature_data = bpy.data.armatures.new(name)
+            armature_obj = bpy.data.objects.new(name, armature_data)
+            bpy.context.collection.objects.link(armature_obj)
+            armature_obj.location = mathutils.Vector(loc)
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            s = scale  # shorthand
+            bones = armature_data.edit_bones
+
+            # Spine
+            hips = bones.new("Hips")
+            hips.head = (0, 0, 0.95 * s)
+            hips.tail = (0, 0, 1.05 * s)
+
+            spine = bones.new("Spine")
+            spine.head = hips.tail.copy()
+            spine.tail = (0, 0, 1.2 * s)
+            spine.parent = hips
+            spine.use_connect = True
+
+            chest = bones.new("Chest")
+            chest.head = spine.tail.copy()
+            chest.tail = (0, 0, 1.4 * s)
+            chest.parent = spine
+            chest.use_connect = True
+
+            neck = bones.new("Neck")
+            neck.head = chest.tail.copy()
+            neck.tail = (0, 0, 1.55 * s)
+            neck.parent = chest
+            neck.use_connect = True
+
+            head = bones.new("Head")
+            head.head = neck.tail.copy()
+            head.tail = (0, 0, 1.75 * s)
+            head.parent = neck
+            head.use_connect = True
+
+            # Left arm
+            shoulder_l = bones.new("Shoulder.L")
+            shoulder_l.head = (0.05 * s, 0, 1.38 * s)
+            shoulder_l.tail = (0.18 * s, 0, 1.38 * s)
+            shoulder_l.parent = chest
+
+            upper_arm_l = bones.new("UpperArm.L")
+            upper_arm_l.head = shoulder_l.tail.copy()
+            upper_arm_l.tail = (0.45 * s, 0, 1.38 * s)
+            upper_arm_l.parent = shoulder_l
+            upper_arm_l.use_connect = True
+
+            forearm_l = bones.new("Forearm.L")
+            forearm_l.head = upper_arm_l.tail.copy()
+            forearm_l.tail = (0.68 * s, 0, 1.38 * s)
+            forearm_l.parent = upper_arm_l
+            forearm_l.use_connect = True
+
+            hand_l = bones.new("Hand.L")
+            hand_l.head = forearm_l.tail.copy()
+            hand_l.tail = (0.78 * s, 0, 1.38 * s)
+            hand_l.parent = forearm_l
+            hand_l.use_connect = True
+
+            # Right arm
+            shoulder_r = bones.new("Shoulder.R")
+            shoulder_r.head = (-0.05 * s, 0, 1.38 * s)
+            shoulder_r.tail = (-0.18 * s, 0, 1.38 * s)
+            shoulder_r.parent = chest
+
+            upper_arm_r = bones.new("UpperArm.R")
+            upper_arm_r.head = shoulder_r.tail.copy()
+            upper_arm_r.tail = (-0.45 * s, 0, 1.38 * s)
+            upper_arm_r.parent = shoulder_r
+            upper_arm_r.use_connect = True
+
+            forearm_r = bones.new("Forearm.R")
+            forearm_r.head = upper_arm_r.tail.copy()
+            forearm_r.tail = (-0.68 * s, 0, 1.38 * s)
+            forearm_r.parent = upper_arm_r
+            forearm_r.use_connect = True
+
+            hand_r = bones.new("Hand.R")
+            hand_r.head = forearm_r.tail.copy()
+            hand_r.tail = (-0.78 * s, 0, 1.38 * s)
+            hand_r.parent = forearm_r
+            hand_r.use_connect = True
+
+            # Left leg
+            upper_leg_l = bones.new("UpperLeg.L")
+            upper_leg_l.head = (0.1 * s, 0, 0.93 * s)
+            upper_leg_l.tail = (0.1 * s, 0, 0.5 * s)
+            upper_leg_l.parent = hips
+
+            lower_leg_l = bones.new("LowerLeg.L")
+            lower_leg_l.head = upper_leg_l.tail.copy()
+            lower_leg_l.tail = (0.1 * s, 0, 0.08 * s)
+            lower_leg_l.parent = upper_leg_l
+            lower_leg_l.use_connect = True
+
+            foot_l = bones.new("Foot.L")
+            foot_l.head = lower_leg_l.tail.copy()
+            foot_l.tail = (0.1 * s, -0.12 * s, 0.0)
+            foot_l.parent = lower_leg_l
+            foot_l.use_connect = True
+
+            toe_l = bones.new("Toe.L")
+            toe_l.head = foot_l.tail.copy()
+            toe_l.tail = (0.1 * s, -0.2 * s, 0.0)
+            toe_l.parent = foot_l
+            toe_l.use_connect = True
+
+            # Right leg
+            upper_leg_r = bones.new("UpperLeg.R")
+            upper_leg_r.head = (-0.1 * s, 0, 0.93 * s)
+            upper_leg_r.tail = (-0.1 * s, 0, 0.5 * s)
+            upper_leg_r.parent = hips
+
+            lower_leg_r = bones.new("LowerLeg.R")
+            lower_leg_r.head = upper_leg_r.tail.copy()
+            lower_leg_r.tail = (-0.1 * s, 0, 0.08 * s)
+            lower_leg_r.parent = upper_leg_r
+            lower_leg_r.use_connect = True
+
+            foot_r = bones.new("Foot.R")
+            foot_r.head = lower_leg_r.tail.copy()
+            foot_r.tail = (-0.1 * s, -0.12 * s, 0.0)
+            foot_r.parent = lower_leg_r
+            foot_r.use_connect = True
+
+            toe_r = bones.new("Toe.R")
+            toe_r.head = foot_r.tail.copy()
+            toe_r.tail = (-0.1 * s, -0.2 * s, 0.0)
+            toe_r.parent = foot_r
+            toe_r.use_connect = True
+
+            bone_names = [b.name for b in bones]
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "armature_name": armature_obj.name,
+                "bone_count": len(bone_names),
+                "bones": bone_names,
+                "height": height,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error creating humanoid rig: {str(e)}")
+
+    # ==================== End Rigging Tools ====================
 
     def get_polyhaven_categories(self, asset_type):
         """Get categories for a specific asset type from Polyhaven"""

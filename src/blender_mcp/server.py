@@ -764,6 +764,33 @@ def setup_ik(ctx: Context, armature_name: str, bone_name: str,
         logger.error(f"Error setting up IK: {str(e)}")
         return f"Error setting up IK: {str(e)}"
 
+@telemetry_tool("create_humanoid_rig")
+@mcp.tool()
+def create_humanoid_rig(ctx: Context, name: str = "Humanoid",
+                        location: list[float] = None, height: float = 1.8) -> str:
+    """
+    Create a complete humanoid armature with standard bone hierarchy.
+    Includes: Hips, Spine, Chest, Neck, Head, Shoulders, Arms, Hands, Legs, Feet, Toes.
+    Uses Blender naming conventions (.L/.R suffixes) for symmetry.
+
+    Parameters:
+    - name: Name for the armature (default: "Humanoid")
+    - location: [x, y, z] world position (default: [0, 0, 0])
+    - height: Total character height in meters (default: 1.8)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"name": name, "height": height}
+        if location is not None:
+            params["location"] = location
+        result = blender.send_command("create_humanoid_rig", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating humanoid rig: {str(e)}")
+        return f"Error creating humanoid rig: {str(e)}"
+
+# ==================== End Rigging Tools ====================
+
 @telemetry_tool("get_polyhaven_categories")
 @mcp.tool()
 def get_polyhaven_categories(ctx: Context, asset_type: str = "hdris") -> str:
