@@ -1621,6 +1621,64 @@ def asset_creation_strategy() -> str:
     - The task specifically requires a basic material/color
     """
 
+@mcp.prompt()
+def rigging_strategy() -> str:
+    """Defines the preferred strategy for rigging characters and objects in Blender"""
+    return """When rigging 3D models in Blender, follow this workflow:
+
+    1. Planning the Rig
+        - FIRST use get_mesh_analysis() to understand the mesh's shape, dimensions, center,
+          cross-sections, and mesh islands. This tells you the bounding box, where the mesh is
+          widest/narrowest along its height, whether it's symmetric, and which parts are
+          disconnected (eyes, teeth, clothing, accessories, etc.) — essential for knowing
+          where to place bones and which parts need separate vertex group assignments.
+        - For humanoid characters, use create_humanoid_rig() which creates a standard skeleton
+          with Hips, Spine, Chest, Neck, Head, Arms, Legs, and proper .L/.R naming.
+          Pass the character's height so bones scale to match the mesh.
+        - For non-humanoid creatures or mechanical rigs, use create_armature() and then
+          add_bone() or add_bone_chain() to build a custom skeleton
+        - Use get_armature_info() to inspect the current rig structure at any point
+        - Use get_object_info() on armatures to see their bone hierarchy
+
+    2. Building the Skeleton
+        - Start with the root/hip bone, then build outward
+        - Use add_bone_chain() for repeating structures (spine, tail, fingers, tentacles)
+        - Use add_bone() for individual bones that need precise placement
+        - Use edit_bone() to adjust bone positions, parents, or properties
+        - Mark non-deforming bones (controls, mechanisms) with use_deform=False
+
+    3. Skinning (Binding Mesh to Armature)
+        - Use parent_mesh_to_armature() with ARMATURE_AUTO for automatic weight painting
+        - If automatic weights fail or need adjustment:
+          - Use manage_vertex_groups() with action="list" to see current groups
+          - Use manage_vertex_groups() with action="assign" to manually set weights
+          - Use manage_vertex_groups() with action="create" to add missing groups
+
+    4. Adding Constraints (IK, FK, etc.)
+        - Use setup_ik() for quick IK setup on limbs
+          - For arms: Apply to Hand bone with chain_count=2
+          - For legs: Apply to Foot bone with chain_count=2
+          - Add pole bones for knee/elbow direction control
+        - Use add_bone_constraint() for other constraints:
+          - COPY_ROTATION for FK controls
+          - LIMIT_ROTATION to restrict joint angles
+          - DAMPED_TRACK for look-at targets (eyes, head tracking)
+          - STRETCH_TO for stretchy limbs
+          - FLOOR for foot-ground contact
+
+    5. Posing
+        - Use set_bone_pose() to set rotation/location/scale of individual bones
+        - Use reset_pose() to return to rest position
+        - Always check the viewport with get_viewport_screenshot() after posing
+
+    Tips:
+    - Blender uses .L and .R suffixes for left/right bones (e.g. "Hand.L", "Foot.R")
+    - Bone head is the root/pivot, tail points toward the next bone
+    - Connected bones share their parent's tail position
+    - IK chain_count=0 means the chain goes all the way to the root
+    - Use get_armature_info() to verify the rig hierarchy after major changes
+    """
+
 # Main execution
 
 def main():
