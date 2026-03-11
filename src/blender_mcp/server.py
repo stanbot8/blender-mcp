@@ -1655,222 +1655,59 @@ def asset_creation_strategy() -> str:
 @mcp.prompt()
 def rigging_strategy() -> str:
     """Defines the preferred strategy for rigging characters and objects in Blender"""
-    return """When rigging 3D models in Blender, follow this workflow:
+    return """Rigging workflow for Blender (with UE export support):
 
-    1. Analyzing the Mesh (ALWAYS do this first — never guess bone positions)
-        - Use get_mesh_analysis() to understand shape, dimensions, center, cross-sections,
-          symmetry, and mesh islands (disconnected parts like eyes, teeth, accessories).
-        - Use get_mesh_landmarks() to get named pivot points for bone placement:
-          * extremities: top/bottom/left/right/front/back vertex positions
-          * spine_line: center of mass at each height level with width & depth
-          * joint_candidates: narrowing points (neck, waist, wrists, ankles)
-          * width_maxima: widening points (shoulders, hips)
-          * labeled_islands: island centers with spatial labels
-        - NEVER hardcode bone positions. Use landmarks so rigs adapt to any mesh.
+1. ANALYZE MESH FIRST (never guess positions)
+  - get_mesh_analysis(): shape, dimensions, symmetry, islands (eyes/teeth/accessories)
+  - get_mesh_landmarks(): extremities, spine_line (center+width per height), joint_candidates (narrowing=joints), width_maxima (widening=shoulders/hips), labeled_islands
+  - Always use landmark coordinates for bone placement, never hardcode
 
-    2. Planning Bone Placement (use landmark data to decide positions)
-        - For humanoid characters, use create_humanoid_rig() for a standard skeleton
-          with Hips, Spine, Chest, Neck, Head, Arms, Legs, and .L/.R naming.
-          Pass the character's height from landmarks so bones scale to match.
-        - For non-humanoid/custom rigs, use create_armature() + add_bone()/add_bone_chain().
-        - Use get_armature_info() and get_object_info() to inspect structure at any point.
+2. PLAN
+  - Humanoid: create_humanoid_rig(height=landmarks.height) → Hips/Spine/Chest/Neck/Head/Arms/Legs with .L/.R
+  - Custom: create_armature() + add_bone()/add_bone_chain()
+  - Inspect: get_armature_info(), get_object_info()
 
-    3. Bone Positioning Rules (critical for good deformation)
+3. POSITIONING RULES
+  Spine: along spine_line centers, centered in mesh with slight +Y offset. 1 bone per rigid area, 2 per flexible. Head base at jaw, top at crown. Neck bones aligned straight. Shoulders behind collarbone.
+  Arms: straight shoulder→hand line, then slight elbow bend toward +Y. This tells IK which way to bend — without it, IK flips randomly. Use width_maxima for shoulder position.
+  Legs: straight hip→ankle, then slight knee bend toward -Y (forward). Heel spans foot width, toes/heels on ground plane. Use joint_candidates for hip/knee.
+  Fingers: chains must stay connected (gaps=failure). Align via edge loops. Palm heads spaced apart. Roll X-axis = curl direction.
+  Bone roll: Y-axis runs head→tail. Wrong roll = bad twisting. Align with anatomical features. IK chains: Z-axis primary rotation. Roll recalc: -Z for fingers, +Y for thumbs.
+  General: use bbox center not origin. Symmetric meshes (likely_symmetric): compute one side, mirror .L/.R.
 
-        Spine & Torso:
-        - Place spine bones along the spine_line center positions from landmarks.
-        - Keep spine centered inside the mesh volume, slight offset toward the back (+Y).
-        - Use 1 bone for rigid areas (chest, pelvis), 2 for flexible areas (lower back).
-        - Head bone base near jaw level, top at the top of the head.
-        - Keep neck bones as straight/aligned as possible.
-        - Shoulder bones act as general deformers — place slightly behind the collarbone.
+4. BUILD
+  Root/hip first, build outward. add_bone_chain() for spines/tails/fingers. add_bone() for precise placement. edit_bone() for adjustments. use_deform=False for non-deforming bones.
 
-        Arms:
-        - Start with a straight line from shoulder to hand in both front and top views.
-        - THEN add a slight bend at the elbow, pushing it toward +Y (backward).
-          This bend tells the IK solver which direction the elbow should point.
-          Without it, IK will flip unpredictably.
-        - Use width_maxima from landmarks to find shoulder height/width.
+5. SKIN
+  parent_mesh_to_armature(ARMATURE_AUTO) for auto weights (bone heat). WARNING: overwrites existing vertex groups — use ARMATURE_NAME to preserve.
+  Bone Heat failed? Scale up 100x temporarily; fix non-manifold geo; separate islands and weight individually; ensure bone line-of-sight to vertices.
+  Refinement: joint vertices need 10-40% weight for skin stretching. Smooth brush for boundaries. Auto Normalize keeps weights summing to 1.0. manage_vertex_groups(action="assign") for programmatic control.
+  Islands (eyes/teeth): assign dedicated vertex groups manually.
 
-        Legs:
-        - Align bones in a straight line from hip to ankle.
-        - THEN add a slight bend at the knee, pushing it toward -Y (forward).
-          Same reason as elbow — IK needs to know bending direction.
-        - Heel bone should align with the character's heel and span the foot width.
-        - Toes and heels on the same horizontal plane (ground level).
-        - Use joint_candidates from landmarks to find hip/knee narrowing points.
+6. CONSTRAINTS
+  setup_ik(): Arms=Hand chain_count=2, Legs=Foot chain_count=2. Add pole bones for direction. chain_count: 1=self, 2=+parent, 0=to root. Pole target disables IK lock on root.
+  add_bone_constraint(): COPY_ROTATION(FK), LIMIT_ROTATION(joint limits), DAMPED_TRACK(look-at), STRETCH_TO(stretchy), FLOOR(ground contact)
 
-        Fingers:
-        - Keep finger bone chains fully connected — any gap causes failures.
-        - Use mesh edge loops or vertex positions to align bones with fingers.
-        - Keep palm bone heads slightly spaced from each other.
-        - Finger roll axis (X) must align with the curl direction.
+7. VERIFY
+  set_bone_pose() to test, reset_pose() to clear, get_viewport_screenshot() to check. Confirm elbows bend back, knees bend forward.
 
-        Bone Roll (the rotation around a bone's Y axis):
-        - Roll determines how twist deformation behaves — wrong roll = ugly twisting.
-        - For organic characters, align bone axes with anatomical features (elbows, knees).
-        - For IK chains, keep the Z-axis as the primary rotation axis to minimize
-          pole target offset issues.
-        - Maintain consistent bone rolls along entire chains.
-        - Recalculate roll: Global -Z Axis for fingers, Global +Y Axis for thumbs.
+KEY FACTS: .L/.R naming | head=pivot, tail=toward child | connected bones share parent tail | bone Y-axis=head→tail | elbow/knee bend is THE most critical detail for IK | vertex groups override envelopes
 
-        General:
-        - Use the mesh's bounding box center, NOT the origin, as reference.
-        - For symmetric meshes (likely_symmetric=True), only compute one side
-          and mirror with .L/.R suffixes.
-        - joint_candidates (narrowing points) are natural joint locations.
-        - width_maxima (widening points) mark shoulders, hips, chest transitions.
-
-    4. Building the Skeleton
-        - Start with the root/hip bone, then build outward.
-        - Use add_bone_chain() for repeating structures (spine, tail, fingers, tentacles).
-        - Use add_bone() for individual bones that need precise placement.
-        - Use edit_bone() to adjust positions, parents, roll, or use_deform.
-        - Mark non-deforming bones (controls, mechanisms) with use_deform=False.
-
-    5. Skinning (Binding Mesh to Armature)
-        - Use parent_mesh_to_armature() with ARMATURE_AUTO for automatic weight painting.
-        - Automatic weights use "bone heat" — distance-based influence from each bone.
-        - WARNING: Automatic weights override ALL existing vertex groups with matching
-          bone names. Use ARMATURE_NAME (empty groups) to preserve existing weights.
-
-        If "Bone Heat Weighting failed":
-        - The mesh may be too small — temporarily scale mesh+armature up 100x, parent,
-          then scale back down.
-        - Check for non-manifold geometry (interior faces, loose verts, duplicate edges).
-        - Try separating disconnected mesh islands, weighting each separately, then rejoining.
-        - Ensure every mesh island has at least one bone nearby with line-of-sight.
-
-        Weight painting refinement:
-        - Bone area should be red (weight 1.0), fading through rainbow to blue at distance.
-        - Vertices around joints need light weights (10-40%) for natural skin stretching.
-        - Use Smooth brush to blend sharp weight boundaries.
-        - Enable Auto Normalize to keep total weights per vertex at 1.0.
-        - Use manage_vertex_groups() with action="assign" for programmatic weight control.
-
-        For mesh islands (eyes, teeth, accessories):
-        - Assign dedicated vertex groups so they move with the correct bone.
-        - Small islands far from bones often need manual weight assignment.
-
-    6. Adding Constraints (IK, FK, etc.)
-        - Use setup_ik() for quick IK setup on limbs:
-          - Arms: Apply to Hand bone, chain_count=2
-          - Legs: Apply to Foot bone, chain_count=2
-          - Add pole bones for knee/elbow direction control
-        - Pole targets determine limb rotation (elbow/knee direction).
-          The slight bend added in step 3 is what makes this work correctly.
-        - chain_count=1 rotates only the bone itself, =2 includes parent,
-          =0 goes all the way to the root.
-        - NOTE: If a pole target is used, IK locking won't work on the root bone.
-        - Use add_bone_constraint() for other constraints:
-          - COPY_ROTATION for FK controls
-          - LIMIT_ROTATION to restrict joint angles
-          - DAMPED_TRACK for look-at targets (eyes, head tracking)
-          - STRETCH_TO for stretchy limbs
-          - FLOOR for foot-ground contact
-
-    7. Posing & Verification
-        - Use set_bone_pose() to test with rotation/location/scale.
-        - Use reset_pose() to return to rest position.
-        - Always check the viewport with get_viewport_screenshot() after posing.
-        - Verify IK bends correctly (elbows back, knees forward).
-
-    Key Facts:
-    - Blender uses .L and .R suffixes for left/right bones (e.g. "Hand.L", "Foot.R")
-    - Bone head = root/pivot, tail = points toward next bone
-    - Connected bones share their parent's tail position
-    - Bone Y-axis always runs from head to tail (the "roll" axis)
-    - The slight bend at elbows/knees is the MOST important positioning detail —
-      without it, IK produces unpredictable flipping
-    - Bone envelopes define a distance-based influence volume around each bone;
-      vertex groups override envelopes for fine control
-    - Use get_armature_info() to verify the rig hierarchy after major changes
-
-    8. Exporting to Unreal Engine (Blender → UE differences)
-
-        Coordinate systems:
-        - Blender: right-handed, Z-up, Y-forward (front view looks along +Y)
-        - Unreal: left-handed, Z-up, X-forward
-        - The Y-axis effectively flips between them. FBX handles this automatically
-          with correct export settings, but be aware of it.
-
-        Units & Scale:
-        - Blender defaults to meters (1 unit = 1m)
-        - Unreal defaults to centimeters (1 unit = 1cm)
-        - Factor of 100x difference. Set Blender scene units to Centimeters
-          but keep Unit Scale at 1.0 (do NOT change Unit Scale).
-        - If bones appear tiny in UE physics assets, temporarily scale armature+mesh
-          100x in Blender, apply transforms, export, then scale back.
-
-        Bone naming (Blender → UE mannequin convention):
-        - Blender uses .L/.R suffixes: "UpperArm.L", "Hand.R"
-        - UE uses _l/_r suffixes, lowercase, underscores: "upperarm_l", "hand_r"
-        - Conversion rules: CamelCase→lowercase, dots→underscores, .L→_l, .R→_r
-
-        UE5 Mannequin skeleton (89 bones) — standard hierarchy:
-          root → pelvis
-            pelvis → spine_01 → spine_02 → spine_03 → spine_04 → spine_05
-              spine_05 → neck_01 → neck_02 → head
-              spine_05 → clavicle_l → upperarm_l → lowerarm_l → hand_l
-                hand_l → index_01_l/middle_01_l/ring_01_l/pinky_01_l/thumb_01_l
-                  (each finger: _01 → _02 → _03)
-              spine_05 → clavicle_r → upperarm_r → lowerarm_r → hand_r
-                (same finger structure with _r)
-            pelvis → thigh_l → calf_l → foot_l → ball_l
-            pelvis → thigh_r → calf_r → foot_r → ball_r
-            (+ IK bones: ik_foot_root, ik_foot_l, ik_foot_r, ik_hand_root,
-              ik_hand_gun, ik_hand_l, ik_hand_r)
-
-        Blender bone name → UE mannequin name mapping:
-          Hips → pelvis              Spine → spine_01
-          Spine.001 → spine_02       Spine.002 → spine_03
-          Chest → spine_04           Chest.001 → spine_05
-          Neck → neck_01             Neck.001 → neck_02
-          Head → head
-          Shoulder.L → clavicle_l    Shoulder.R → clavicle_r
-          UpperArm.L → upperarm_l    UpperArm.R → upperarm_r
-          Forearm.L → lowerarm_l     Forearm.R → lowerarm_r
-          Hand.L → hand_l            Hand.R → hand_r
-          UpperLeg.L → thigh_l       UpperLeg.R → thigh_r
-          LowerLeg.L → calf_l        LowerLeg.R → calf_r
-          Foot.L → foot_l            Foot.R → foot_r
-          Toe.L → ball_l             Toe.R → ball_r
-
-        FBX Export settings (critical):
-        - Uncheck "Add Leaf Bones" — adds useless extra bones at chain ends
-        - Check "Only Deform Bones" — excludes control/mechanism bones
-        - Turn off "Bake Animation" if exporting mesh only
-        - Set Smoothing to "Edge" (avoids UE import warnings)
-        - Object Types: select only Armature + Mesh
-        - Primary Bone Axis: Y, Secondary Bone Axis: X (defaults)
-        - Apply Scalings: "FBX All"
-
-        UE Import settings:
-        - Select "Import Normals" (not "Compute") to preserve hard edges
-        - The armature object named "Armature" is auto-removed by UE as a root bone.
-          If you want to keep it, rename it to "root" in Blender.
-
-        Common problems:
-        - Mesh rotated 90° in UE → apply rotation in Blender before export (Ctrl+A)
-        - Bones too small for physics asset → scale workaround (100x up, apply, export)
-        - Extra root bone → delete the empty "Armature" node or rename it
-        - Animation scale drift → ensure armature name matches between mesh and anim exports
-        - Leaf bones cluttering skeleton → always disable "Add Leaf Bones"
-
-        Spine count differences:
-        - UE4 mannequin: 4 spine + 1 neck
-        - UE5 mannequin: 5 spine + 2 neck
-        - When building for UE, match the target skeleton's spine/neck count
-
-        Bone orientation difference:
-        - Blender bones have a visible head→tail with Y-axis along the shaft
-        - UE bones are single points; shafts drawn between parent and child
-        - Blender forces all bones to orient Y-axis toward tail
-        - UE/Maya/FBX allow arbitrary bone orientation (e.g., UE mannequin legs
-          point -X on left, +X on right)
-        - This mismatch is handled by the FBX exporter, but building the rig
-          in Blender with correct hierarchy ensures clean import
-    """
+8. BLENDER → UNREAL ENGINE
+  Coordinates: Blender=right-hand Z-up Y-forward, UE=left-hand Z-up X-forward (Y flips, FBX handles it)
+  Scale: Blender=meters, UE=centimeters (100x). Set Blender to cm, keep Unit Scale=1.0. Tiny bones in UE? Scale 100x, apply, export, scale back.
+  Bone naming: Blender .L/.R CamelCase → UE _l/_r lowercase_underscores
+  UE5 Mannequin (89 bones):
+    root→pelvis→spine_01→02→03→04→05→neck_01→02→head
+    spine_05→clavicle_l→upperarm_l→lowerarm_l→hand_l→[index/middle/ring/pinky/thumb]_01-03_l
+    pelvis→thigh_l→calf_l→foot_l→ball_l (same _r) + ik_foot/hand bones
+  Name mapping: Hips→pelvis, Spine→spine_01, Chest→spine_04, Neck→neck_01, Head→head, Shoulder→clavicle, UpperArm→upperarm, Forearm→lowerarm, Hand→hand, UpperLeg→thigh, LowerLeg→calf, Foot→foot, Toe→ball
+  FBX export: disable Add Leaf Bones, enable Only Deform Bones, Smoothing=Edge, Armature+Mesh only, Apply Scalings=FBX All. No Bake Animation for mesh-only.
+  UE import: Import Normals (not Compute). "Armature" object auto-removed — rename to "root" to keep.
+  Common fixes: 90° rotation→apply transforms(Ctrl+A), tiny bones→100x scale trick, extra root→rename armature, leaf bones→disable in exporter
+  Spine counts: UE4=4spine+1neck, UE5=5spine+2neck — match target skeleton
+  Bone orientation: Blender forces Y along shaft; UE allows arbitrary orientation per bone. FBX exporter handles conversion.
+"""
 
 # Main execution
 
