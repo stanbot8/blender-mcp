@@ -19,6 +19,11 @@ dependencies = [
     "tomli>=2.0.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
 [project.scripts]
 blender-mcp = "blender_mcp.server:main"
 
