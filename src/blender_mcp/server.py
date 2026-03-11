@@ -372,6 +372,182 @@ def get_mesh_analysis(ctx: Context, mesh_name: str, num_slices: int = 5) -> str:
         logger.error(f"Error analyzing mesh: {str(e)}")
         return f"Error analyzing mesh: {str(e)}"
 
+# ==================== Rigging Tools ====================
+
+@telemetry_tool("create_armature")
+@mcp.tool()
+def create_armature(ctx: Context, name: str = "Armature", location: list[float] = None) -> str:
+    """
+    Create a new armature object with a single root bone.
+
+    Parameters:
+    - name: Name for the armature (default: "Armature")
+    - location: [x, y, z] world position (default: [0, 0, 0])
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"name": name}
+        if location is not None:
+            params["location"] = location
+        result = blender.send_command("create_armature", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating armature: {str(e)}")
+        return f"Error creating armature: {str(e)}"
+
+@telemetry_tool("add_bone")
+@mcp.tool()
+def add_bone(ctx: Context, armature_name: str, bone_name: str,
+             head: list[float] = None, tail: list[float] = None,
+             parent_bone: str = None, connected: bool = False,
+             roll: float = 0.0) -> str:
+    """
+    Add a bone to an existing armature.
+
+    Parameters:
+    - armature_name: Name of the armature object
+    - bone_name: Name for the new bone
+    - head: [x, y, z] position of bone head (in armature local space)
+    - tail: [x, y, z] position of bone tail (in armature local space)
+    - parent_bone: Name of parent bone (optional)
+    - connected: Whether to connect the bone to its parent (default: False)
+    - roll: Bone roll angle in radians (default: 0.0)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {
+            "armature_name": armature_name,
+            "bone_name": bone_name,
+            "head": head or [0, 0, 0],
+            "tail": tail or [0, 0, 1],
+            "connected": connected,
+            "roll": roll,
+        }
+        if parent_bone:
+            params["parent_bone"] = parent_bone
+        result = blender.send_command("add_bone", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error adding bone: {str(e)}")
+        return f"Error adding bone: {str(e)}"
+
+@telemetry_tool("add_bone_chain")
+@mcp.tool()
+def add_bone_chain(ctx: Context, armature_name: str, chain_name: str,
+                   start: list[float] = None, direction: list[float] = None,
+                   count: int = 3, bone_length: float = 0.3,
+                   parent_bone: str = None) -> str:
+    """
+    Add a chain of connected bones. Useful for spines, tails, tentacles, fingers, etc.
+
+    Parameters:
+    - armature_name: Name of the armature object
+    - chain_name: Base name for bones (e.g. "Spine" creates Spine_01, Spine_02, ...)
+    - start: [x, y, z] start position of the chain
+    - direction: [x, y, z] direction vector for the chain
+    - count: Number of bones in the chain (default: 3)
+    - bone_length: Length of each bone in the chain (default: 0.3)
+    - parent_bone: Name of parent bone for first bone in chain (optional)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {
+            "armature_name": armature_name,
+            "chain_name": chain_name,
+            "start": start or [0, 0, 0],
+            "direction": direction or [0, 0, 1],
+            "count": count,
+            "bone_length": bone_length,
+        }
+        if parent_bone:
+            params["parent_bone"] = parent_bone
+        result = blender.send_command("add_bone_chain", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating bone chain: {str(e)}")
+        return f"Error creating bone chain: {str(e)}"
+
+@telemetry_tool("edit_bone")
+@mcp.tool()
+def edit_bone(ctx: Context, armature_name: str, bone_name: str,
+              head: list[float] = None, tail: list[float] = None,
+              roll: float = None, parent_bone: str = None,
+              use_connect: bool = None, use_deform: bool = None) -> str:
+    """
+    Edit properties of an existing bone.
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_name: Name of the bone to edit
+    - head: New [x, y, z] head position (optional)
+    - tail: New [x, y, z] tail position (optional)
+    - roll: New roll angle in radians (optional)
+    - parent_bone: New parent bone name, or "" to unparent (optional)
+    - use_connect: Whether the bone is connected to parent (optional)
+    - use_deform: Whether the bone is a deform bone (optional)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"armature_name": armature_name, "bone_name": bone_name}
+        if head is not None:
+            params["head"] = head
+        if tail is not None:
+            params["tail"] = tail
+        if roll is not None:
+            params["roll"] = roll
+        if parent_bone is not None:
+            params["parent_bone"] = parent_bone
+        if use_connect is not None:
+            params["use_connect"] = use_connect
+        if use_deform is not None:
+            params["use_deform"] = use_deform
+        result = blender.send_command("edit_bone", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error editing bone: {str(e)}")
+        return f"Error editing bone: {str(e)}"
+
+@telemetry_tool("remove_bone")
+@mcp.tool()
+def remove_bone(ctx: Context, armature_name: str, bone_name: str) -> str:
+    """
+    Remove a bone from an armature.
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_name: Name of the bone to remove
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("remove_bone", {
+            "armature_name": armature_name,
+            "bone_name": bone_name,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error removing bone: {str(e)}")
+        return f"Error removing bone: {str(e)}"
+
+@telemetry_tool("get_armature_info")
+@mcp.tool()
+def get_armature_info(ctx: Context, armature_name: str) -> str:
+    """
+    Get detailed information about an armature including all bones, their hierarchy,
+    constraints, and parented meshes.
+
+    Parameters:
+    - armature_name: Name of the armature object
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("get_armature_info", {
+            "armature_name": armature_name,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting armature info: {str(e)}")
+        return f"Error getting armature info: {str(e)}"
+
 @telemetry_tool("get_polyhaven_categories")
 @mcp.tool()
 def get_polyhaven_categories(ctx: Context, asset_type: str = "hdris") -> str:
