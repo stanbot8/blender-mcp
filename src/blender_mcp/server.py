@@ -1657,45 +1657,111 @@ def rigging_strategy() -> str:
     """Defines the preferred strategy for rigging characters and objects in Blender"""
     return """When rigging 3D models in Blender, follow this workflow:
 
-    1. Planning the Rig
-        - FIRST use get_mesh_analysis() to understand the mesh's shape, dimensions, center,
-          cross-sections, and mesh islands. This tells you the bounding box, where the mesh is
-          widest/narrowest along its height, whether it's symmetric, and which parts are
-          disconnected (eyes, teeth, clothing, accessories, etc.) — essential for knowing
-          where to place bones and which parts need separate vertex group assignments.
-        - THEN use get_mesh_landmarks() to get named pivot points for bone placement.
-          This returns extremities (top/bottom/left/right/front/back), a spine line with
-          width/depth at each height level, joint candidates (narrowing points like neck,
-          waist, wrists — ideal for joint bones), width maxima (widening points like
-          shoulders, hips), and labeled islands. Use these landmarks as coordinates for
-          add_bone() instead of hardcoding positions — this makes rigs adapt to any mesh.
-        - For humanoid characters, use create_humanoid_rig() which creates a standard skeleton
-          with Hips, Spine, Chest, Neck, Head, Arms, Legs, and proper .L/.R naming.
-          Pass the character's height so bones scale to match the mesh.
-        - For non-humanoid creatures or mechanical rigs, use create_armature() and then
-          add_bone() or add_bone_chain() to build a custom skeleton
-        - Use get_armature_info() to inspect the current rig structure at any point
-        - Use get_object_info() on armatures to see their bone hierarchy
+    1. Analyzing the Mesh (ALWAYS do this first — never guess bone positions)
+        - Use get_mesh_analysis() to understand shape, dimensions, center, cross-sections,
+          symmetry, and mesh islands (disconnected parts like eyes, teeth, accessories).
+        - Use get_mesh_landmarks() to get named pivot points for bone placement:
+          * extremities: top/bottom/left/right/front/back vertex positions
+          * spine_line: center of mass at each height level with width & depth
+          * joint_candidates: narrowing points (neck, waist, wrists, ankles)
+          * width_maxima: widening points (shoulders, hips)
+          * labeled_islands: island centers with spatial labels
+        - NEVER hardcode bone positions. Use landmarks so rigs adapt to any mesh.
 
-    2. Building the Skeleton
-        - Start with the root/hip bone, then build outward
-        - Use add_bone_chain() for repeating structures (spine, tail, fingers, tentacles)
-        - Use add_bone() for individual bones that need precise placement
-        - Use edit_bone() to adjust bone positions, parents, or properties
-        - Mark non-deforming bones (controls, mechanisms) with use_deform=False
+    2. Planning Bone Placement (use landmark data to decide positions)
+        - For humanoid characters, use create_humanoid_rig() for a standard skeleton
+          with Hips, Spine, Chest, Neck, Head, Arms, Legs, and .L/.R naming.
+          Pass the character's height from landmarks so bones scale to match.
+        - For non-humanoid/custom rigs, use create_armature() + add_bone()/add_bone_chain().
+        - Use get_armature_info() and get_object_info() to inspect structure at any point.
 
-    3. Skinning (Binding Mesh to Armature)
-        - Use parent_mesh_to_armature() with ARMATURE_AUTO for automatic weight painting
-        - If automatic weights fail or need adjustment:
-          - Use manage_vertex_groups() with action="list" to see current groups
-          - Use manage_vertex_groups() with action="assign" to manually set weights
-          - Use manage_vertex_groups() with action="create" to add missing groups
+    3. Bone Positioning Rules (critical for good deformation)
 
-    4. Adding Constraints (IK, FK, etc.)
-        - Use setup_ik() for quick IK setup on limbs
-          - For arms: Apply to Hand bone with chain_count=2
-          - For legs: Apply to Foot bone with chain_count=2
+        Spine & Torso:
+        - Place spine bones along the spine_line center positions from landmarks.
+        - Keep spine centered inside the mesh volume, slight offset toward the back (+Y).
+        - Use 1 bone for rigid areas (chest, pelvis), 2 for flexible areas (lower back).
+        - Head bone base near jaw level, top at the top of the head.
+        - Keep neck bones as straight/aligned as possible.
+        - Shoulder bones act as general deformers — place slightly behind the collarbone.
+
+        Arms:
+        - Start with a straight line from shoulder to hand in both front and top views.
+        - THEN add a slight bend at the elbow, pushing it toward +Y (backward).
+          This bend tells the IK solver which direction the elbow should point.
+          Without it, IK will flip unpredictably.
+        - Use width_maxima from landmarks to find shoulder height/width.
+
+        Legs:
+        - Align bones in a straight line from hip to ankle.
+        - THEN add a slight bend at the knee, pushing it toward -Y (forward).
+          Same reason as elbow — IK needs to know bending direction.
+        - Heel bone should align with the character's heel and span the foot width.
+        - Toes and heels on the same horizontal plane (ground level).
+        - Use joint_candidates from landmarks to find hip/knee narrowing points.
+
+        Fingers:
+        - Keep finger bone chains fully connected — any gap causes failures.
+        - Use mesh edge loops or vertex positions to align bones with fingers.
+        - Keep palm bone heads slightly spaced from each other.
+        - Finger roll axis (X) must align with the curl direction.
+
+        Bone Roll (the rotation around a bone's Y axis):
+        - Roll determines how twist deformation behaves — wrong roll = ugly twisting.
+        - For organic characters, align bone axes with anatomical features (elbows, knees).
+        - For IK chains, keep the Z-axis as the primary rotation axis to minimize
+          pole target offset issues.
+        - Maintain consistent bone rolls along entire chains.
+        - Recalculate roll: Global -Z Axis for fingers, Global +Y Axis for thumbs.
+
+        General:
+        - Use the mesh's bounding box center, NOT the origin, as reference.
+        - For symmetric meshes (likely_symmetric=True), only compute one side
+          and mirror with .L/.R suffixes.
+        - joint_candidates (narrowing points) are natural joint locations.
+        - width_maxima (widening points) mark shoulders, hips, chest transitions.
+
+    4. Building the Skeleton
+        - Start with the root/hip bone, then build outward.
+        - Use add_bone_chain() for repeating structures (spine, tail, fingers, tentacles).
+        - Use add_bone() for individual bones that need precise placement.
+        - Use edit_bone() to adjust positions, parents, roll, or use_deform.
+        - Mark non-deforming bones (controls, mechanisms) with use_deform=False.
+
+    5. Skinning (Binding Mesh to Armature)
+        - Use parent_mesh_to_armature() with ARMATURE_AUTO for automatic weight painting.
+        - Automatic weights use "bone heat" — distance-based influence from each bone.
+        - WARNING: Automatic weights override ALL existing vertex groups with matching
+          bone names. Use ARMATURE_NAME (empty groups) to preserve existing weights.
+
+        If "Bone Heat Weighting failed":
+        - The mesh may be too small — temporarily scale mesh+armature up 100x, parent,
+          then scale back down.
+        - Check for non-manifold geometry (interior faces, loose verts, duplicate edges).
+        - Try separating disconnected mesh islands, weighting each separately, then rejoining.
+        - Ensure every mesh island has at least one bone nearby with line-of-sight.
+
+        Weight painting refinement:
+        - Bone area should be red (weight 1.0), fading through rainbow to blue at distance.
+        - Vertices around joints need light weights (10-40%) for natural skin stretching.
+        - Use Smooth brush to blend sharp weight boundaries.
+        - Enable Auto Normalize to keep total weights per vertex at 1.0.
+        - Use manage_vertex_groups() with action="assign" for programmatic weight control.
+
+        For mesh islands (eyes, teeth, accessories):
+        - Assign dedicated vertex groups so they move with the correct bone.
+        - Small islands far from bones often need manual weight assignment.
+
+    6. Adding Constraints (IK, FK, etc.)
+        - Use setup_ik() for quick IK setup on limbs:
+          - Arms: Apply to Hand bone, chain_count=2
+          - Legs: Apply to Foot bone, chain_count=2
           - Add pole bones for knee/elbow direction control
+        - Pole targets determine limb rotation (elbow/knee direction).
+          The slight bend added in step 3 is what makes this work correctly.
+        - chain_count=1 rotates only the bone itself, =2 includes parent,
+          =0 goes all the way to the root.
+        - NOTE: If a pole target is used, IK locking won't work on the root bone.
         - Use add_bone_constraint() for other constraints:
           - COPY_ROTATION for FK controls
           - LIMIT_ROTATION to restrict joint angles
@@ -1703,16 +1769,21 @@ def rigging_strategy() -> str:
           - STRETCH_TO for stretchy limbs
           - FLOOR for foot-ground contact
 
-    5. Posing
-        - Use set_bone_pose() to set rotation/location/scale of individual bones
-        - Use reset_pose() to return to rest position
-        - Always check the viewport with get_viewport_screenshot() after posing
+    7. Posing & Verification
+        - Use set_bone_pose() to test with rotation/location/scale.
+        - Use reset_pose() to return to rest position.
+        - Always check the viewport with get_viewport_screenshot() after posing.
+        - Verify IK bends correctly (elbows back, knees forward).
 
-    Tips:
+    Key Facts:
     - Blender uses .L and .R suffixes for left/right bones (e.g. "Hand.L", "Foot.R")
-    - Bone head is the root/pivot, tail points toward the next bone
+    - Bone head = root/pivot, tail = points toward next bone
     - Connected bones share their parent's tail position
-    - IK chain_count=0 means the chain goes all the way to the root
+    - Bone Y-axis always runs from head to tail (the "roll" axis)
+    - The slight bend at elbows/knees is the MOST important positioning detail —
+      without it, IK produces unpredictable flipping
+    - Bone envelopes define a distance-based influence volume around each bone;
+      vertex groups override envelopes for fine control
     - Use get_armature_info() to verify the rig hierarchy after major changes
     """
 
