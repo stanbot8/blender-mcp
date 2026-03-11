@@ -403,6 +403,39 @@ def get_mesh_landmarks(ctx: Context, mesh_name: str, num_height_samples: int = 1
         logger.error(f"Error getting mesh landmarks: {str(e)}")
         return f"Error getting mesh landmarks: {str(e)}"
 
+# ==================== Backup / Restore ====================
+
+@telemetry_tool("backup_blend")
+@mcp.tool()
+def backup_blend(ctx: Context) -> str:
+    """
+    Save a backup of the current .blend file (filename.blend.mcp_backup).
+    Only one backup is kept — each call overwrites the previous one.
+    Note: The addon also auto-backs up before every modifying command.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("backup_blend", {})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error backing up blend: {str(e)}")
+        return f"Error backing up blend: {str(e)}"
+
+@telemetry_tool("restore_blend")
+@mcp.tool()
+def restore_blend(ctx: Context) -> str:
+    """
+    Restore the .blend file from the last MCP backup. This reopens the backup
+    file, reverting all changes made since the last backup was created.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("restore_blend", {})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error restoring blend: {str(e)}")
+        return f"Error restoring blend: {str(e)}"
+
 # ==================== Edge Loop Tools ====================
 
 @telemetry_tool("get_edge_loops")

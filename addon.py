@@ -193,10 +193,39 @@ class BlenderMCPServer:
             traceback.print_exc()
             return {"status": "error", "message": str(e)}
 
+    # Commands that only read data and never modify the scene
+    _READONLY_COMMANDS = frozenset({
+        "get_scene_info", "get_object_info", "get_viewport_screenshot",
+        "get_telemetry_consent", "get_polyhaven_status", "get_hyper3d_status",
+        "get_sketchfab_status", "get_hunyuan3d_status",
+        "get_mesh_analysis", "get_mesh_landmarks", "get_edge_loops",
+        "get_armature_info", "get_polyhaven_categories",
+        "search_polyhaven_assets", "search_sketchfab_models",
+        "backup_blend",
+    })
+
+    def _auto_backup(self):
+        """Save a single rolling backup of the current .blend file.
+        Overwrites the previous backup each time — never piles up."""
+        filepath = bpy.data.filepath
+        if not filepath:
+            return  # File hasn't been saved yet, nothing to back up
+        backup_path = filepath + ".mcp_backup"
+        try:
+            import shutil
+            shutil.copy2(filepath, backup_path)
+            print(f"MCP auto-backup saved: {backup_path}")
+        except Exception as e:
+            print(f"MCP auto-backup failed: {e}")
+
     def _execute_command_internal(self, command):
         """Internal command execution with proper context"""
         cmd_type = command.get("type")
         params = command.get("params", {})
+
+        # Auto-backup before any command that modifies the scene
+        if cmd_type not in self._READONLY_COMMANDS:
+            self._auto_backup()
 
         # Add a handler for checking PolyHaven status
         if cmd_type == "get_polyhaven_status":
@@ -216,6 +245,8 @@ class BlenderMCPServer:
             # Mesh analysis & rigging handlers
             "get_mesh_analysis": self.get_mesh_analysis,
             "get_mesh_landmarks": self.get_mesh_landmarks,
+            "backup_blend": self.backup_blend,
+            "restore_blend": self.restore_blend,
             "get_edge_loops": self.get_edge_loops,
             "select_edge_loop": self.select_edge_loop,
             "select_edge_ring": self.select_edge_ring,
@@ -456,10 +487,48 @@ class BlenderMCPServer:
         except Exception as e:
             return {"error": str(e)}
 
+    def backup_blend(self):
+        """Manually trigger a backup of the current .blend file."""
+        filepath = bpy.data.filepath
+        if not filepath:
+            raise Exception("File has not been saved yet — nothing to back up. Save the .blend first.")
+        backup_path = filepath + ".mcp_backup"
+        import shutil
+        shutil.copy2(filepath, backup_path)
+        return {"backed_up": True, "backup_path": backup_path, "source": filepath}
+
+    def restore_blend(self):
+        """Restore the .blend file from the last MCP backup."""
+        filepath = bpy.data.filepath
+        if not filepath:
+            raise Exception("No file path — cannot restore.")
+        backup_path = filepath + ".mcp_backup"
+        import os
+        if not os.path.exists(backup_path):
+            raise Exception(f"No backup found at {backup_path}")
+        bpy.ops.wm.open_mainfile(filepath=backup_path)
+        return {"restored": True, "from": backup_path}
+
     def execute_code(self, code):
         """Execute arbitrary Blender Python code"""
         # This is powerful but potentially dangerous - use with caution
         try:
+            # Block save operations to prevent accidental overwrites
+            import re as _re
+            save_patterns = [
+                r'bpy\.ops\.wm\.save_mainfile',
+                r'bpy\.ops\.wm\.save_as_mainfile',
+                r'\.save_mainfile\(',
+                r'\.save_as_mainfile\(',
+            ]
+            for pat in save_patterns:
+                if _re.search(pat, code):
+                    return {
+                        "executed": False,
+                        "error": "Saving .blend files via MCP is blocked for safety. "
+                                 "Save manually in Blender (Ctrl+S) or use File > Save."
+                    }
+
             # Create a local namespace for execution
             namespace = {"bpy": bpy}
 
