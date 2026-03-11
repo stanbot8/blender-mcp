@@ -548,6 +548,222 @@ def get_armature_info(ctx: Context, armature_name: str) -> str:
         logger.error(f"Error getting armature info: {str(e)}")
         return f"Error getting armature info: {str(e)}"
 
+@telemetry_tool("parent_mesh_to_armature")
+@mcp.tool()
+def parent_mesh_to_armature(ctx: Context, mesh_name: str, armature_name: str,
+                            parent_type: str = "ARMATURE_AUTO") -> str:
+    """
+    Parent a mesh to an armature with automatic weights or other skinning methods.
+
+    Parameters:
+    - mesh_name: Name of the mesh object
+    - armature_name: Name of the armature object
+    - parent_type: Parenting method. Options:
+        - ARMATURE_AUTO: Automatic weights (best for most cases)
+        - ARMATURE_NAME: Name-based vertex groups
+        - ARMATURE_ENVELOPE: Envelope-based weights
+        - OBJECT: Simple object parenting (no deformation)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("parent_mesh_to_armature", {
+            "mesh_name": mesh_name,
+            "armature_name": armature_name,
+            "parent_type": parent_type,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error parenting mesh to armature: {str(e)}")
+        return f"Error parenting mesh to armature: {str(e)}"
+
+@telemetry_tool("add_bone_constraint")
+@mcp.tool()
+def add_bone_constraint(ctx: Context, armature_name: str, bone_name: str,
+                        constraint_type: str, properties: dict = None) -> str:
+    """
+    Add a constraint to a bone (in pose mode).
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_name: Name of the bone
+    - constraint_type: Type of constraint. Common types:
+        - IK (Inverse Kinematics)
+        - COPY_LOCATION, COPY_ROTATION, COPY_SCALE, COPY_TRANSFORMS
+        - LIMIT_LOCATION, LIMIT_ROTATION, LIMIT_SCALE
+        - TRACK_TO, DAMPED_TRACK, LOCKED_TRACK
+        - STRETCH_TO, FLOOR, CLAMP_TO
+    - properties: Dict of constraint properties. Common keys:
+        - target: Target object name
+        - subtarget: Target bone name
+        - chain_count: IK chain length (0 = root)
+        - pole_target: Pole target object name (for IK)
+        - pole_subtarget: Pole target bone name (for IK)
+        - influence: Constraint influence (0.0-1.0)
+        - use_stretch: Allow stretching (for IK)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {
+            "armature_name": armature_name,
+            "bone_name": bone_name,
+            "constraint_type": constraint_type,
+        }
+        if properties:
+            params["properties"] = properties
+        result = blender.send_command("add_bone_constraint", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error adding bone constraint: {str(e)}")
+        return f"Error adding bone constraint: {str(e)}"
+
+@telemetry_tool("remove_bone_constraint")
+@mcp.tool()
+def remove_bone_constraint(ctx: Context, armature_name: str, bone_name: str,
+                           constraint_name: str) -> str:
+    """
+    Remove a constraint from a bone.
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_name: Name of the bone
+    - constraint_name: Name of the constraint to remove
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("remove_bone_constraint", {
+            "armature_name": armature_name,
+            "bone_name": bone_name,
+            "constraint_name": constraint_name,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error removing bone constraint: {str(e)}")
+        return f"Error removing bone constraint: {str(e)}"
+
+@telemetry_tool("set_bone_pose")
+@mcp.tool()
+def set_bone_pose(ctx: Context, armature_name: str, bone_name: str,
+                  location: list[float] = None, rotation_euler: list[float] = None,
+                  rotation_quaternion: list[float] = None, scale: list[float] = None) -> str:
+    """
+    Set the pose transform of a bone.
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_name: Name of the bone to pose
+    - location: [x, y, z] local offset from rest position (optional)
+    - rotation_euler: [x, y, z] rotation in radians (optional, sets mode to XYZ Euler)
+    - rotation_quaternion: [w, x, y, z] quaternion rotation (optional, sets mode to Quaternion)
+    - scale: [x, y, z] scale (optional)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"armature_name": armature_name, "bone_name": bone_name}
+        if location is not None:
+            params["location"] = location
+        if rotation_euler is not None:
+            params["rotation_euler"] = rotation_euler
+        if rotation_quaternion is not None:
+            params["rotation_quaternion"] = rotation_quaternion
+        if scale is not None:
+            params["scale"] = scale
+        result = blender.send_command("set_bone_pose", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting bone pose: {str(e)}")
+        return f"Error setting bone pose: {str(e)}"
+
+@telemetry_tool("reset_pose")
+@mcp.tool()
+def reset_pose(ctx: Context, armature_name: str, bone_names: list[str] = None) -> str:
+    """
+    Reset pose of all or specific bones to their rest position.
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_names: List of bone names to reset (optional, resets all if not specified)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"armature_name": armature_name}
+        if bone_names:
+            params["bone_names"] = bone_names
+        result = blender.send_command("reset_pose", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error resetting pose: {str(e)}")
+        return f"Error resetting pose: {str(e)}"
+
+@telemetry_tool("manage_vertex_groups")
+@mcp.tool()
+def manage_vertex_groups(ctx: Context, mesh_name: str, action: str,
+                         vertex_group_name: str = "", vertex_indices: list[int] = None,
+                         weight: float = 1.0) -> str:
+    """
+    Create, remove, assign, or list vertex groups on a mesh. Vertex groups control
+    how bones deform a mesh during rigging.
+
+    Parameters:
+    - mesh_name: Name of the mesh object
+    - action: One of: "create", "remove", "assign", "list"
+    - vertex_group_name: Name of the vertex group (not needed for "list")
+    - vertex_indices: List of vertex indices to assign weights to (for "assign")
+    - weight: Weight value 0.0-1.0 (for "assign", default: 1.0)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {
+            "mesh_name": mesh_name,
+            "action": action,
+            "vertex_group_name": vertex_group_name,
+            "weight": weight,
+        }
+        if vertex_indices is not None:
+            params["vertex_indices"] = vertex_indices
+        result = blender.send_command("manage_vertex_groups", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error managing vertex groups: {str(e)}")
+        return f"Error managing vertex groups: {str(e)}"
+
+@telemetry_tool("setup_ik")
+@mcp.tool()
+def setup_ik(ctx: Context, armature_name: str, bone_name: str,
+             chain_count: int = 0, target_bone: str = None,
+             pole_bone: str = None, pole_angle: float = 0.0,
+             use_stretch: bool = False) -> str:
+    """
+    Set up Inverse Kinematics (IK) on a bone with common settings.
+    This is a convenience tool that creates an IK constraint with typical parameters.
+
+    Parameters:
+    - armature_name: Name of the armature
+    - bone_name: Name of the bone to add IK to (usually the last bone in a chain, e.g. hand or foot)
+    - chain_count: Number of bones in the IK chain (0 = all the way to root)
+    - target_bone: Name of the IK target bone (optional, uses armature as target object)
+    - pole_bone: Name of the pole target bone for controlling bend direction (optional)
+    - pole_angle: Pole angle in radians (default: 0.0)
+    - use_stretch: Allow bones to stretch to reach target (default: False)
+    """
+    try:
+        blender = get_blender_connection()
+        params = {
+            "armature_name": armature_name,
+            "bone_name": bone_name,
+            "chain_count": chain_count,
+            "use_stretch": use_stretch,
+        }
+        if target_bone:
+            params["target_bone"] = target_bone
+        if pole_bone:
+            params["pole_bone"] = pole_bone
+            params["pole_angle"] = pole_angle
+        result = blender.send_command("setup_ik", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting up IK: {str(e)}")
+        return f"Error setting up IK: {str(e)}"
+
 @telemetry_tool("get_polyhaven_categories")
 @mcp.tool()
 def get_polyhaven_categories(ctx: Context, asset_type: str = "hdris") -> str:

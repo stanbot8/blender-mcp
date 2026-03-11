@@ -221,6 +221,13 @@ class BlenderMCPServer:
             "edit_bone": self.edit_bone,
             "remove_bone": self.remove_bone,
             "get_armature_info": self.get_armature_info,
+            "parent_mesh_to_armature": self.parent_mesh_to_armature,
+            "add_bone_constraint": self.add_bone_constraint,
+            "remove_bone_constraint": self.remove_bone_constraint,
+            "set_bone_pose": self.set_bone_pose,
+            "reset_pose": self.reset_pose,
+            "manage_vertex_groups": self.manage_vertex_groups,
+            "setup_ik": self.setup_ik,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -844,6 +851,328 @@ class BlenderMCPServer:
             }
         except Exception as e:
             raise Exception(f"Error getting armature info: {str(e)}")
+
+    def parent_mesh_to_armature(self, mesh_name, armature_name, parent_type="ARMATURE_AUTO"):
+        """Parent a mesh to an armature with automatic weights or other methods"""
+        try:
+            mesh_obj = bpy.data.objects.get(mesh_name)
+            if not mesh_obj or mesh_obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            # Deselect all, then select mesh and armature
+            bpy.ops.object.select_all(action='DESELECT')
+            mesh_obj.select_set(True)
+            armature_obj.select_set(True)
+            bpy.context.view_layer.objects.active = armature_obj
+
+            # Parent with automatic weights or other type
+            valid_types = ["ARMATURE_AUTO", "ARMATURE_NAME", "ARMATURE_ENVELOPE", "OBJECT"]
+            if parent_type not in valid_types:
+                raise ValueError(f"Invalid parent type: {parent_type}. Must be one of: {valid_types}")
+
+            if parent_type == "OBJECT":
+                bpy.ops.object.parent_set(type='OBJECT')
+            else:
+                bpy.ops.object.parent_set(type=parent_type)
+
+            # Check if armature modifier was added
+            has_modifier = any(
+                mod.type == 'ARMATURE' for mod in mesh_obj.modifiers
+            )
+
+            # Get vertex groups created
+            vertex_groups = [vg.name for vg in mesh_obj.vertex_groups]
+
+            return {
+                "mesh": mesh_obj.name,
+                "armature": armature_obj.name,
+                "parent_type": parent_type,
+                "has_armature_modifier": has_modifier,
+                "vertex_groups_count": len(vertex_groups),
+                "vertex_groups": vertex_groups[:20],  # Limit output
+            }
+        except Exception as e:
+            raise Exception(f"Error parenting mesh to armature: {str(e)}")
+
+    def add_bone_constraint(self, armature_name, bone_name, constraint_type, properties=None):
+        """Add a constraint to a pose bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            pose_bone = armature_obj.pose.bones.get(bone_name)
+            if not pose_bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            # Map friendly names to Blender constraint types
+            constraint_map = {
+                "IK": "IK",
+                "INVERSE_KINEMATICS": "IK",
+                "COPY_LOCATION": "COPY_LOCATION",
+                "COPY_ROTATION": "COPY_ROTATION",
+                "COPY_SCALE": "COPY_SCALE",
+                "COPY_TRANSFORMS": "COPY_TRANSFORMS",
+                "LIMIT_LOCATION": "LIMIT_LOCATION",
+                "LIMIT_ROTATION": "LIMIT_ROTATION",
+                "LIMIT_SCALE": "LIMIT_SCALE",
+                "TRACK_TO": "TRACK_TO",
+                "DAMPED_TRACK": "DAMPED_TRACK",
+                "LOCKED_TRACK": "LOCKED_TRACK",
+                "STRETCH_TO": "STRETCH_TO",
+                "FLOOR": "FLOOR",
+                "CLAMP_TO": "CLAMP_TO",
+                "TRANSFORMATION": "TRANSFORMATION",
+            }
+
+            ctype = constraint_map.get(constraint_type.upper(), constraint_type.upper())
+            constraint = pose_bone.constraints.new(type=ctype)
+
+            # Apply properties
+            props = properties or {}
+            for key, value in props.items():
+                if key == "target":
+                    target_obj = bpy.data.objects.get(value)
+                    if target_obj:
+                        constraint.target = target_obj
+                elif key == "subtarget":
+                    constraint.subtarget = value
+                elif key == "pole_target":
+                    pole_obj = bpy.data.objects.get(value)
+                    if pole_obj:
+                        constraint.pole_target = pole_obj
+                elif key == "pole_subtarget":
+                    constraint.pole_subtarget = value
+                elif key == "pole_angle":
+                    constraint.pole_angle = value
+                elif key == "chain_count":
+                    constraint.chain_count = value
+                elif key == "use_tail" and hasattr(constraint, 'use_tail'):
+                    constraint.use_tail = value
+                elif key == "use_stretch" and hasattr(constraint, 'use_stretch'):
+                    constraint.use_stretch = value
+                elif key == "influence":
+                    constraint.influence = value
+                elif key == "name":
+                    constraint.name = value
+                elif hasattr(constraint, key):
+                    setattr(constraint, key, value)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "constraint_name": constraint.name,
+                "constraint_type": ctype,
+                "bone": bone_name,
+                "armature": armature_name,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error adding constraint: {str(e)}")
+
+    def remove_bone_constraint(self, armature_name, bone_name, constraint_name):
+        """Remove a constraint from a pose bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            pose_bone = armature_obj.pose.bones.get(bone_name)
+            if not pose_bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            constraint = pose_bone.constraints.get(constraint_name)
+            if not constraint:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Constraint not found: {constraint_name}")
+
+            pose_bone.constraints.remove(constraint)
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "removed": constraint_name,
+                "bone": bone_name,
+                "armature": armature_name,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error removing constraint: {str(e)}")
+
+    def set_bone_pose(self, armature_name, bone_name, location=None, rotation_euler=None,
+                      rotation_quaternion=None, scale=None):
+        """Set the pose transform of a bone"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            pose_bone = armature_obj.pose.bones.get(bone_name)
+            if not pose_bone:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError(f"Bone not found: {bone_name}")
+
+            if location is not None:
+                pose_bone.location = mathutils.Vector(location)
+            if rotation_euler is not None:
+                pose_bone.rotation_mode = 'XYZ'
+                pose_bone.rotation_euler = mathutils.Euler(rotation_euler)
+            if rotation_quaternion is not None:
+                pose_bone.rotation_mode = 'QUATERNION'
+                pose_bone.rotation_quaternion = mathutils.Quaternion(rotation_quaternion)
+            if scale is not None:
+                pose_bone.scale = mathutils.Vector(scale)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "bone": bone_name,
+                "armature": armature_name,
+                "posed": True
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error setting bone pose: {str(e)}")
+
+    def reset_pose(self, armature_name, bone_names=None):
+        """Reset pose of all or specific bones to rest position"""
+        try:
+            armature_obj = bpy.data.objects.get(armature_name)
+            if not armature_obj or armature_obj.type != 'ARMATURE':
+                raise ValueError(f"Armature not found: {armature_name}")
+
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='POSE')
+
+            reset_bones = []
+            bones_to_reset = bone_names or [b.name for b in armature_obj.pose.bones]
+
+            for bname in bones_to_reset:
+                pose_bone = armature_obj.pose.bones.get(bname)
+                if pose_bone:
+                    pose_bone.location = (0, 0, 0)
+                    pose_bone.rotation_quaternion = (1, 0, 0, 0)
+                    pose_bone.rotation_euler = (0, 0, 0)
+                    pose_bone.scale = (1, 1, 1)
+                    reset_bones.append(bname)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            return {
+                "armature": armature_name,
+                "reset_bones": reset_bones,
+                "count": len(reset_bones)
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error resetting pose: {str(e)}")
+
+    def manage_vertex_groups(self, mesh_name, action, vertex_group_name, vertex_indices=None, weight=1.0):
+        """Create, remove, or assign weights to vertex groups"""
+        try:
+            mesh_obj = bpy.data.objects.get(mesh_name)
+            if not mesh_obj or mesh_obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            if action == "create":
+                vg = mesh_obj.vertex_groups.new(name=vertex_group_name)
+                return {
+                    "action": "created",
+                    "vertex_group": vg.name,
+                    "mesh": mesh_name
+                }
+
+            elif action == "remove":
+                vg = mesh_obj.vertex_groups.get(vertex_group_name)
+                if not vg:
+                    raise ValueError(f"Vertex group not found: {vertex_group_name}")
+                mesh_obj.vertex_groups.remove(vg)
+                return {
+                    "action": "removed",
+                    "vertex_group": vertex_group_name,
+                    "mesh": mesh_name
+                }
+
+            elif action == "assign":
+                vg = mesh_obj.vertex_groups.get(vertex_group_name)
+                if not vg:
+                    vg = mesh_obj.vertex_groups.new(name=vertex_group_name)
+                if vertex_indices:
+                    vg.add(vertex_indices, weight, 'REPLACE')
+                return {
+                    "action": "assigned",
+                    "vertex_group": vg.name,
+                    "mesh": mesh_name,
+                    "vertex_count": len(vertex_indices) if vertex_indices else 0,
+                    "weight": weight
+                }
+
+            elif action == "list":
+                groups = [{"name": vg.name, "index": vg.index} for vg in mesh_obj.vertex_groups]
+                return {
+                    "action": "list",
+                    "mesh": mesh_name,
+                    "vertex_groups": groups,
+                    "count": len(groups)
+                }
+
+            else:
+                raise ValueError(f"Unknown action: {action}. Must be create, remove, assign, or list")
+
+        except Exception as e:
+            raise Exception(f"Error managing vertex groups: {str(e)}")
+
+    def setup_ik(self, armature_name, bone_name, chain_count=0, target_bone=None,
+                 pole_bone=None, pole_angle=0.0, use_stretch=False):
+        """Convenience method to set up IK on a bone with common settings"""
+        try:
+            props = {
+                "target": armature_name,
+                "chain_count": chain_count,
+                "use_stretch": use_stretch,
+            }
+
+            if target_bone:
+                props["subtarget"] = target_bone
+            if pole_bone:
+                props["pole_target"] = armature_name
+                props["pole_subtarget"] = pole_bone
+                props["pole_angle"] = pole_angle
+
+            return self.add_bone_constraint(
+                armature_name=armature_name,
+                bone_name=bone_name,
+                constraint_type="IK",
+                properties=props
+            )
+        except Exception as e:
+            raise Exception(f"Error setting up IK: {str(e)}")
 
 
     def get_polyhaven_categories(self, asset_type):
