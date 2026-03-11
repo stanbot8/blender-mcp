@@ -403,6 +403,86 @@ def get_mesh_landmarks(ctx: Context, mesh_name: str, num_height_samples: int = 1
         logger.error(f"Error getting mesh landmarks: {str(e)}")
         return f"Error getting mesh landmarks: {str(e)}"
 
+# ==================== Edge Loop Tools ====================
+
+@telemetry_tool("get_edge_loops")
+@mcp.tool()
+def get_edge_loops(ctx: Context, mesh_name: str, max_loops: int = 50) -> str:
+    """
+    Detect edge loops in a mesh. Returns loops sorted by size (largest first),
+    each with center position, edge count, and vertex positions. Useful for
+    understanding mesh topology, finding cross-sections, and placing bones along loops.
+
+    Parameters:
+    - mesh_name: Name of the mesh object
+    - max_loops: Maximum number of loops to return (default: 50)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("get_edge_loops", {
+            "mesh_name": mesh_name,
+            "max_loops": max_loops,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting edge loops: {str(e)}")
+        return f"Error getting edge loops: {str(e)}"
+
+@telemetry_tool("select_edge_loop")
+@mcp.tool()
+def select_edge_loop(ctx: Context, mesh_name: str, edge_index: int = None,
+                     position: list[float] = None, extend: bool = False) -> str:
+    """
+    Select an edge loop in the viewport. Specify the starting edge by index
+    or by a world-space position (nearest edge is found). Returns the selected
+    loop's vertices and center. The mesh stays in Edit Mode so the selection is visible.
+
+    Parameters:
+    - mesh_name: Name of the mesh object
+    - edge_index: Index of an edge on the loop (optional)
+    - position: [x, y, z] world position to find nearest edge (optional)
+    - extend: If True, add to existing selection instead of replacing
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"mesh_name": mesh_name, "extend": extend}
+        if edge_index is not None:
+            params["edge_index"] = edge_index
+        if position is not None:
+            params["position"] = position
+        result = blender.send_command("select_edge_loop", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error selecting edge loop: {str(e)}")
+        return f"Error selecting edge loop: {str(e)}"
+
+@telemetry_tool("select_edge_ring")
+@mcp.tool()
+def select_edge_ring(ctx: Context, mesh_name: str, edge_index: int = None,
+                     position: list[float] = None, extend: bool = False) -> str:
+    """
+    Select an edge ring (perpendicular to edge loops, runs along quads).
+    Useful for selecting cross-sections of limbs, tubes, and cylindrical shapes.
+
+    Parameters:
+    - mesh_name: Name of the mesh object
+    - edge_index: Index of an edge on the ring (optional)
+    - position: [x, y, z] world position to find nearest edge (optional)
+    - extend: If True, add to existing selection instead of replacing
+    """
+    try:
+        blender = get_blender_connection()
+        params = {"mesh_name": mesh_name, "extend": extend}
+        if edge_index is not None:
+            params["edge_index"] = edge_index
+        if position is not None:
+            params["position"] = position
+        result = blender.send_command("select_edge_ring", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error selecting edge ring: {str(e)}")
+        return f"Error selecting edge ring: {str(e)}"
+
 # ==================== Rigging Tools ====================
 
 @telemetry_tool("create_armature")

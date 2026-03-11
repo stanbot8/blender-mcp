@@ -216,6 +216,9 @@ class BlenderMCPServer:
             # Mesh analysis & rigging handlers
             "get_mesh_analysis": self.get_mesh_analysis,
             "get_mesh_landmarks": self.get_mesh_landmarks,
+            "get_edge_loops": self.get_edge_loops,
+            "select_edge_loop": self.select_edge_loop,
+            "select_edge_ring": self.select_edge_ring,
             "create_armature": self.create_armature,
             "add_bone": self.add_bone,
             "add_bone_chain": self.add_bone_chain,
@@ -756,6 +759,371 @@ class BlenderMCPServer:
             }
         except Exception as e:
             raise Exception(f"Error getting mesh landmarks: {str(e)}")
+
+    # ==================== Edge Loop Tools ====================
+
+    def _walk_edge_loop(self, bm, start_edge):
+        """Walk an edge loop from a starting edge using bmesh topology.
+        Returns list of edge indices forming the loop."""
+        import bmesh as bm_mod
+
+        def bm_edge_other_loop(edge, loop):
+            l_other = loop if loop.edge == edge else loop.link_loop_prev
+            l_other = l_other.link_loop_radial_next
+            if l_other.vert == loop.vert:
+                return l_other.link_loop_prev
+            elif l_other.link_loop_next.vert == loop.vert:
+                return l_other.link_loop_next
+            return None
+
+        def bm_vert_step_fan(loop, e_step):
+            if loop.edge == e_step:
+                e_next = loop.link_loop_prev.edge
+            elif loop.link_loop_prev.edge == e_step:
+                e_next = loop.edge
+            else:
+                return None
+            if e_next.is_manifold:
+                return bm_edge_other_loop(e_next, loop)
+            return None
+
+        if not start_edge.link_loops:
+            return [start_edge.index]
+
+        result_indices = [start_edge.index]
+        visited = {start_edge.index}
+
+        # Walk in both directions from start edge
+        for direction in range(2):
+            e_step = start_edge
+            loop = e_step.link_loops[0]
+            if direction == 1:
+                loop = loop.link_loop_next
+
+            pcv = loop.vert
+            pov = loop.edge.other_vert(loop.vert)
+
+            for _ in range(10000):
+                new_loop = bm_vert_step_fan(loop, e_step)
+                if new_loop is None:
+                    break
+
+                e_step = new_loop.edge
+                if e_step.index in visited:
+                    break
+                visited.add(e_step.index)
+                if direction == 0:
+                    result_indices.append(e_step.index)
+                else:
+                    result_indices.insert(0, e_step.index)
+
+                cur_v = new_loop.vert
+                oth_v = new_loop.edge.other_vert(new_loop.vert)
+                rad_v = new_loop.link_loop_radial_next.vert
+
+                if cur_v == rad_v and oth_v != pcv:
+                    loop = new_loop.link_loop_next
+                    pcv, pov = oth_v, cur_v
+                elif oth_v == pcv:
+                    loop = new_loop
+                    pcv, pov = cur_v, oth_v
+                elif cur_v == pcv:
+                    loop = new_loop.link_loop_radial_next
+                    pcv, pov = oth_v, cur_v
+                else:
+                    break
+
+        return result_indices
+
+    def get_edge_loops(self, mesh_name, max_loops=50):
+        """Detect edge loops in a mesh. Returns loops as lists of vertex positions.
+        Useful for understanding mesh topology and placing bones along loops."""
+        import bmesh
+        try:
+            obj = bpy.data.objects.get(mesh_name)
+            if not obj or obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
+
+            world = obj.matrix_world
+            visited_edges = set()
+            loops = []
+
+            for edge in bm.edges:
+                if edge.index in visited_edges:
+                    continue
+                # Only start from manifold edges (shared by exactly 2 faces)
+                if not edge.is_manifold:
+                    continue
+
+                loop_indices = self._walk_edge_loop(bm, edge)
+                if len(loop_indices) < 3:
+                    continue
+
+                visited_edges.update(loop_indices)
+
+                # Get vertex positions for this loop
+                loop_verts = []
+                for ei in loop_indices:
+                    e = bm.edges[ei]
+                    for v in e.verts:
+                        if not loop_verts or v.index != loop_verts[-1]["index"]:
+                            co = world @ v.co
+                            loop_verts.append({
+                                "index": v.index,
+                                "position": [round(co.x, 4), round(co.y, 4), round(co.z, 4)]
+                            })
+
+                # Compute loop center and orientation
+                positions = [v["position"] for v in loop_verts]
+                n = len(positions)
+                center = [
+                    round(sum(p[0] for p in positions) / n, 4),
+                    round(sum(p[1] for p in positions) / n, 4),
+                    round(sum(p[2] for p in positions) / n, 4),
+                ]
+
+                loops.append({
+                    "edge_count": len(loop_indices),
+                    "vertex_count": len(loop_verts),
+                    "center": center,
+                    "edge_indices": loop_indices,
+                    "vertices": loop_verts[:100],  # Limit for large loops
+                })
+
+                if len(loops) >= max_loops:
+                    break
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            # Sort by edge count (largest loops first — usually most useful)
+            loops.sort(key=lambda l: l["edge_count"], reverse=True)
+
+            return {
+                "mesh_name": obj.name,
+                "loop_count": len(loops),
+                "loops": loops,
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error getting edge loops: {str(e)}")
+
+    def select_edge_loop(self, mesh_name, edge_index=None, position=None, extend=False):
+        """Select an edge loop in the viewport. Specify by edge index or nearest position.
+        Returns the selected loop's vertex positions."""
+        import bmesh
+        try:
+            obj = bpy.data.objects.get(mesh_name)
+            if not obj or obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
+
+            world = obj.matrix_world
+            world_inv = world.inverted()
+
+            # Find the target edge
+            if edge_index is not None:
+                if edge_index < 0 or edge_index >= len(bm.edges):
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    raise ValueError(f"Edge index {edge_index} out of range (0-{len(bm.edges)-1})")
+                target_edge = bm.edges[edge_index]
+            elif position is not None:
+                # Find nearest edge to world position
+                pos = mathutils.Vector(position)
+                local_pos = world_inv @ pos
+                best_dist = float('inf')
+                target_edge = bm.edges[0]
+                for edge in bm.edges:
+                    mid = (edge.verts[0].co + edge.verts[1].co) / 2
+                    dist = (mid - local_pos).length
+                    if dist < best_dist:
+                        best_dist = dist
+                        target_edge = edge
+            else:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError("Provide edge_index or position")
+
+            # Clear selection unless extending
+            if not extend:
+                for e in bm.edges:
+                    e.select = False
+                for v in bm.verts:
+                    v.select = False
+
+            # Walk and select the loop
+            loop_indices = self._walk_edge_loop(bm, target_edge)
+            loop_verts = []
+            for ei in loop_indices:
+                e = bm.edges[ei]
+                e.select = True
+                for v in e.verts:
+                    v.select = True
+                    co = world @ v.co
+                    loop_verts.append({
+                        "index": v.index,
+                        "position": [round(co.x, 4), round(co.y, 4), round(co.z, 4)]
+                    })
+
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data)
+            # Stay in edit mode so selection is visible
+
+            positions = [v["position"] for v in loop_verts]
+            n = len(positions) if positions else 1
+            center = [
+                round(sum(p[0] for p in positions) / n, 4),
+                round(sum(p[1] for p in positions) / n, 4),
+                round(sum(p[2] for p in positions) / n, 4),
+            ]
+
+            return {
+                "mesh_name": obj.name,
+                "edge_count": len(loop_indices),
+                "vertex_count": len(loop_verts),
+                "center": center,
+                "edge_indices": loop_indices,
+                "vertices": loop_verts[:100],
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error selecting edge loop: {str(e)}")
+
+    def select_edge_ring(self, mesh_name, edge_index=None, position=None, extend=False):
+        """Select an edge ring (perpendicular to edge loops). Useful for selecting
+        cross-sections of limbs/tubes."""
+        import bmesh
+        try:
+            obj = bpy.data.objects.get(mesh_name)
+            if not obj or obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
+
+            world = obj.matrix_world
+            world_inv = world.inverted()
+
+            # Find the target edge
+            if edge_index is not None:
+                if edge_index < 0 or edge_index >= len(bm.edges):
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    raise ValueError(f"Edge index {edge_index} out of range")
+                target_edge = bm.edges[edge_index]
+            elif position is not None:
+                pos = mathutils.Vector(position)
+                local_pos = world_inv @ pos
+                best_dist = float('inf')
+                target_edge = bm.edges[0]
+                for edge in bm.edges:
+                    mid = (edge.verts[0].co + edge.verts[1].co) / 2
+                    dist = (mid - local_pos).length
+                    if dist < best_dist:
+                        best_dist = dist
+                        target_edge = edge
+            else:
+                bpy.ops.object.mode_set(mode='OBJECT')
+                raise ValueError("Provide edge_index or position")
+
+            if not extend:
+                for e in bm.edges:
+                    e.select = False
+                for v in bm.verts:
+                    v.select = False
+
+            # Edge ring: walk across quads via opposite edges
+            ring_indices = [target_edge.index]
+            visited = {target_edge.index}
+
+            def get_opposite_edge(edge, face):
+                """In a quad face, get the edge opposite to the given edge."""
+                if len(face.edges) != 4:
+                    return None
+                for e in face.edges:
+                    if e == edge:
+                        continue
+                    if not any(v in edge.verts for v in e.verts):
+                        return e
+                return None
+
+            # Walk in both directions
+            for start_face_idx in range(2):
+                current = target_edge
+                faces = list(current.link_faces)
+                if start_face_idx >= len(faces):
+                    continue
+                current_face = faces[start_face_idx]
+
+                for _ in range(10000):
+                    opp = get_opposite_edge(current, current_face)
+                    if opp is None or opp.index in visited:
+                        break
+                    visited.add(opp.index)
+                    ring_indices.append(opp.index)
+
+                    # Move to next face
+                    next_faces = [f for f in opp.link_faces if f != current_face]
+                    if not next_faces:
+                        break
+                    current = opp
+                    current_face = next_faces[0]
+
+            # Select and gather data
+            loop_verts = []
+            for ei in ring_indices:
+                e = bm.edges[ei]
+                e.select = True
+                for v in e.verts:
+                    v.select = True
+                    co = world @ v.co
+                    loop_verts.append({
+                        "index": v.index,
+                        "position": [round(co.x, 4), round(co.y, 4), round(co.z, 4)]
+                    })
+
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data)
+
+            positions = [v["position"] for v in loop_verts]
+            n = len(positions) if positions else 1
+            center = [
+                round(sum(p[0] for p in positions) / n, 4),
+                round(sum(p[1] for p in positions) / n, 4),
+                round(sum(p[2] for p in positions) / n, 4),
+            ]
+
+            return {
+                "mesh_name": obj.name,
+                "edge_count": len(ring_indices),
+                "vertex_count": len(loop_verts),
+                "center": center,
+                "edge_indices": ring_indices,
+                "vertices": loop_verts[:100],
+            }
+        except Exception as e:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            raise Exception(f"Error selecting edge ring: {str(e)}")
 
     # ==================== Rigging Tools ====================
 

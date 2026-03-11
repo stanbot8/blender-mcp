@@ -36,6 +36,9 @@ from blender_mcp.server import (  # noqa: E402
     create_humanoid_rig as tool_create_humanoid,
     get_mesh_analysis as tool_mesh_analysis,
     get_mesh_landmarks as tool_mesh_landmarks,
+    get_edge_loops as tool_get_edge_loops,
+    select_edge_loop as tool_select_edge_loop,
+    select_edge_ring as tool_select_edge_ring,
 )
 
 
@@ -127,6 +130,61 @@ class TestMeshLandmarksTool:
         assert args["num_height_samples"] == 15
         data = json.loads(result)
         assert data["height"] == 1.8
+
+
+class TestEdgeLoopTools:
+    def test_get_edge_loops(self, mock_blender, ctx):
+        mock_blender.send_command.return_value = {
+            "mesh_name": "Tube", "loop_count": 5, "loops": []
+        }
+        result = tool_get_edge_loops(ctx, mesh_name="Tube", max_loops=10)
+        args = mock_blender.send_command.call_args[0]
+        assert args[0] == "get_edge_loops"
+        assert args[1]["mesh_name"] == "Tube"
+        assert args[1]["max_loops"] == 10
+        data = json.loads(result)
+        assert data["loop_count"] == 5
+
+    def test_select_edge_loop_by_index(self, mock_blender, ctx):
+        mock_blender.send_command.return_value = {
+            "mesh_name": "Cube", "edge_count": 4, "vertex_count": 4,
+            "center": [0, 0, 0], "edge_indices": [0, 1, 2, 3], "vertices": []
+        }
+        result = tool_select_edge_loop(ctx, mesh_name="Cube", edge_index=5)
+        args = mock_blender.send_command.call_args[0][1]
+        assert args["edge_index"] == 5
+        assert args["mesh_name"] == "Cube"
+        data = json.loads(result)
+        assert data["edge_count"] == 4
+
+    def test_select_edge_loop_by_position(self, mock_blender, ctx):
+        mock_blender.send_command.return_value = {
+            "mesh_name": "Arm", "edge_count": 8, "vertex_count": 8,
+            "center": [1, 0, 1], "edge_indices": [], "vertices": []
+        }
+        result = tool_select_edge_loop(ctx, mesh_name="Arm", position=[1, 0, 1])
+        args = mock_blender.send_command.call_args[0][1]
+        assert args["position"] == [1, 0, 1]
+
+    def test_select_edge_ring(self, mock_blender, ctx):
+        mock_blender.send_command.return_value = {
+            "mesh_name": "Leg", "edge_count": 6, "vertex_count": 12,
+            "center": [0, 0, 0.5], "edge_indices": [0, 3, 6], "vertices": []
+        }
+        result = tool_select_edge_ring(ctx, mesh_name="Leg", edge_index=0)
+        args = mock_blender.send_command.call_args[0]
+        assert args[0] == "select_edge_ring"
+        data = json.loads(result)
+        assert data["edge_count"] == 6
+
+    def test_extend_selection(self, mock_blender, ctx):
+        mock_blender.send_command.return_value = {
+            "mesh_name": "M", "edge_count": 4, "vertex_count": 4,
+            "center": [0, 0, 0], "edge_indices": [], "vertices": []
+        }
+        tool_select_edge_loop(ctx, mesh_name="M", edge_index=0, extend=True)
+        args = mock_blender.send_command.call_args[0][1]
+        assert args["extend"] is True
 
 
 class TestHumanoidRigTool:
