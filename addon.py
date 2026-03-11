@@ -215,6 +215,7 @@ class BlenderMCPServer:
             "get_hunyuan3d_status": self.get_hunyuan3d_status,
             # Mesh analysis & rigging handlers
             "get_mesh_analysis": self.get_mesh_analysis,
+            "get_mesh_landmarks": self.get_mesh_landmarks,
             "create_armature": self.create_armature,
             "add_bone": self.add_bone,
             "add_bone_chain": self.add_bone_chain,
@@ -589,6 +590,172 @@ class BlenderMCPServer:
             }
         except Exception as e:
             raise Exception(f"Error analyzing mesh: {str(e)}")
+
+    def get_mesh_landmarks(self, mesh_name, num_height_samples=10):
+        """Detect key geometric landmarks on a mesh for bone placement.
+        Returns named pivot points: extremities, spine line, joint candidates,
+        and labeled island centers."""
+        try:
+            obj = bpy.data.objects.get(mesh_name)
+            if not obj or obj.type != 'MESH':
+                raise ValueError(f"Mesh not found: {mesh_name}")
+
+            mesh = obj.data
+            world_matrix = obj.matrix_world
+            verts_world = [world_matrix @ v.co for v in mesh.vertices]
+            if not verts_world:
+                raise ValueError("Mesh has no vertices")
+
+            xs = [v.x for v in verts_world]
+            ys = [v.y for v in verts_world]
+            zs = [v.z for v in verts_world]
+
+            def r3(v):
+                return [round(v[0], 4), round(v[1], 4), round(v[2], 4)]
+
+            # --- Extremities ---
+            extremities = {
+                "top":    r3(verts_world[zs.index(max(zs))]),
+                "bottom": r3(verts_world[zs.index(min(zs))]),
+                "left":   r3(verts_world[xs.index(min(xs))]),  # -X
+                "right":  r3(verts_world[xs.index(max(xs))]),   # +X
+                "front":  r3(verts_world[ys.index(min(ys))]),  # -Y
+                "back":   r3(verts_world[ys.index(max(ys))]),   # +Y
+            }
+
+            bbox_min = [min(xs), min(ys), min(zs)]
+            bbox_max = [max(xs), max(ys), max(zs)]
+            height = bbox_max[2] - bbox_min[2]
+
+            # --- Spine line: center of mass at each height level ---
+            spine_points = []
+            if height > 0 and num_height_samples > 0:
+                tolerance = height / num_height_samples / 2
+                for i in range(num_height_samples):
+                    t = (i + 0.5) / num_height_samples
+                    z_level = bbox_min[2] + t * height
+                    nearby = [v for v in verts_world if abs(v.z - z_level) < tolerance]
+                    if nearby:
+                        cx = sum(v.x for v in nearby) / len(nearby)
+                        cy = sum(v.y for v in nearby) / len(nearby)
+                        width = max(v.x for v in nearby) - min(v.x for v in nearby)
+                        depth = max(v.y for v in nearby) - min(v.y for v in nearby)
+                        spine_points.append({
+                            "height_pct": round(t * 100, 1),
+                            "position": r3((cx, cy, z_level)),
+                            "width": round(width, 4),
+                            "depth": round(depth, 4),
+                        })
+
+            # --- Joint candidates: local minima in cross-section width ---
+            # These are natural narrowing points (neck, waist, wrists, ankles)
+            joint_candidates = []
+            if len(spine_points) >= 3:
+                for i in range(1, len(spine_points) - 1):
+                    prev_w = spine_points[i-1]["width"]
+                    curr_w = spine_points[i]["width"]
+                    next_w = spine_points[i+1]["width"]
+                    if curr_w < prev_w and curr_w < next_w:
+                        joint_candidates.append({
+                            "position": spine_points[i]["position"],
+                            "height_pct": spine_points[i]["height_pct"],
+                            "width": curr_w,
+                            "type": "narrowing",
+                        })
+
+            # --- Width maxima: shoulders, hips ---
+            width_maxima = []
+            if len(spine_points) >= 3:
+                for i in range(1, len(spine_points) - 1):
+                    prev_w = spine_points[i-1]["width"]
+                    curr_w = spine_points[i]["width"]
+                    next_w = spine_points[i+1]["width"]
+                    if curr_w > prev_w and curr_w > next_w:
+                        width_maxima.append({
+                            "position": spine_points[i]["position"],
+                            "height_pct": spine_points[i]["height_pct"],
+                            "width": curr_w,
+                            "type": "widening",
+                        })
+
+            # --- Island centers with spatial labels ---
+            from collections import defaultdict
+            vert_count = len(mesh.vertices)
+            parent = list(range(vert_count))
+
+            def find(x):
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+
+            for edge in mesh.edges:
+                union(edge.vertices[0], edge.vertices[1])
+
+            island_verts = defaultdict(list)
+            for vi in range(vert_count):
+                island_verts[find(vi)].append(vi)
+
+            # Build labeled islands
+            center_x = (bbox_min[0] + bbox_max[0]) / 2
+            center_z = (bbox_min[2] + bbox_max[2]) / 2
+            labeled_islands = []
+            for root, vert_indices in sorted(island_verts.items(),
+                                              key=lambda item: len(item[1]),
+                                              reverse=True):
+                island_ws = [verts_world[vi] for vi in vert_indices]
+                ic = [sum(v.x for v in island_ws) / len(island_ws),
+                      sum(v.y for v in island_ws) / len(island_ws),
+                      sum(v.z for v in island_ws) / len(island_ws)]
+
+                # Label based on position relative to mesh center
+                labels = []
+                if len(vert_indices) == max(len(v) for v in island_verts.values()):
+                    labels.append("main_body")
+                else:
+                    # Height-based
+                    rel_z = (ic[2] - bbox_min[2]) / height if height > 0 else 0.5
+                    if rel_z > 0.85:
+                        labels.append("top_region")
+                    elif rel_z < 0.15:
+                        labels.append("bottom_region")
+
+                    # Side-based
+                    x_offset = ic[0] - center_x
+                    width = bbox_max[0] - bbox_min[0]
+                    if width > 0:
+                        if x_offset > width * 0.15:
+                            labels.append("right_side")
+                        elif x_offset < -width * 0.15:
+                            labels.append("left_side")
+                        else:
+                            labels.append("center")
+
+                    if not labels:
+                        labels.append("detail")
+
+                labeled_islands.append({
+                    "center": r3(ic),
+                    "vertex_count": len(vert_indices),
+                    "labels": labels,
+                })
+
+            return {
+                "mesh_name": obj.name,
+                "height": round(height, 4),
+                "extremities": extremities,
+                "spine_line": spine_points,
+                "joint_candidates": joint_candidates,
+                "width_maxima": width_maxima,
+                "labeled_islands": labeled_islands[:20],
+            }
+        except Exception as e:
+            raise Exception(f"Error getting mesh landmarks: {str(e)}")
 
     # ==================== Rigging Tools ====================
 

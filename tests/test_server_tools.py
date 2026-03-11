@@ -35,6 +35,7 @@ from blender_mcp.server import (  # noqa: E402
     setup_ik as tool_setup_ik,
     create_humanoid_rig as tool_create_humanoid,
     get_mesh_analysis as tool_mesh_analysis,
+    get_mesh_landmarks as tool_mesh_landmarks,
 )
 
 
@@ -111,6 +112,21 @@ class TestMeshAnalysisTool:
         assert args["num_slices"] == 10
         data = json.loads(result)
         assert data["island_count"] == 3
+
+
+class TestMeshLandmarksTool:
+    def test_sends_command(self, mock_blender, ctx):
+        mock_blender.send_command.return_value = {
+            "mesh_name": "Body", "height": 1.8, "extremities": {},
+            "spine_line": [], "joint_candidates": [], "width_maxima": [],
+            "labeled_islands": []
+        }
+        result = tool_mesh_landmarks(ctx, mesh_name="Body", num_height_samples=15)
+        args = mock_blender.send_command.call_args[0][1]
+        assert args["mesh_name"] == "Body"
+        assert args["num_height_samples"] == 15
+        data = json.loads(result)
+        assert data["height"] == 1.8
 
 
 class TestHumanoidRigTool:

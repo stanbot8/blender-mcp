@@ -372,6 +372,37 @@ def get_mesh_analysis(ctx: Context, mesh_name: str, num_slices: int = 5) -> str:
         logger.error(f"Error analyzing mesh: {str(e)}")
         return f"Error analyzing mesh: {str(e)}"
 
+@telemetry_tool("get_mesh_landmarks")
+@mcp.tool()
+def get_mesh_landmarks(ctx: Context, mesh_name: str, num_height_samples: int = 10) -> str:
+    """
+    Detect key geometric landmarks on a mesh for intelligent bone placement.
+    Instead of hardcoding bone coordinates, use landmarks to place bones at
+    anatomically meaningful positions (narrowing points for joints, widening
+    points for shoulders/hips, extremities for chain endpoints).
+
+    Returns:
+    - extremities: top, bottom, left, right, front, back vertex positions
+    - spine_line: center of mass at each height level with width/depth measurements
+    - joint_candidates: local minima in width (narrowing points like neck, waist, wrists)
+    - width_maxima: local maxima in width (widening points like shoulders, hips)
+    - labeled_islands: island centers with spatial labels (main_body, top_region, left_side, etc.)
+
+    Parameters:
+    - mesh_name: Name of the mesh object to analyze
+    - num_height_samples: Number of height levels to sample (default: 10). More = finer detection.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("get_mesh_landmarks", {
+            "mesh_name": mesh_name,
+            "num_height_samples": num_height_samples,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting mesh landmarks: {str(e)}")
+        return f"Error getting mesh landmarks: {str(e)}"
+
 # ==================== Rigging Tools ====================
 
 @telemetry_tool("create_armature")
@@ -1632,6 +1663,12 @@ def rigging_strategy() -> str:
           widest/narrowest along its height, whether it's symmetric, and which parts are
           disconnected (eyes, teeth, clothing, accessories, etc.) — essential for knowing
           where to place bones and which parts need separate vertex group assignments.
+        - THEN use get_mesh_landmarks() to get named pivot points for bone placement.
+          This returns extremities (top/bottom/left/right/front/back), a spine line with
+          width/depth at each height level, joint candidates (narrowing points like neck,
+          waist, wrists — ideal for joint bones), width maxima (widening points like
+          shoulders, hips), and labeled islands. Use these landmarks as coordinates for
+          add_bone() instead of hardcoding positions — this makes rigs adapt to any mesh.
         - For humanoid characters, use create_humanoid_rig() which creates a standard skeleton
           with Hips, Spine, Chest, Neck, Head, Arms, Legs, and proper .L/.R naming.
           Pass the character's height so bones scale to match the mesh.
