@@ -200,6 +200,7 @@ class BlenderMCPServer:
         "get_sketchfab_status", "get_hunyuan3d_status",
         "get_mesh_analysis", "get_mesh_landmarks", "get_edge_loops",
         "get_armature_info", "get_polyhaven_categories",
+        "inspect_blend_file", "inspect_blend_object",
         "search_polyhaven_assets", "search_sketchfab_models",
         "backup_blend",
     })
@@ -247,6 +248,9 @@ class BlenderMCPServer:
             "get_mesh_landmarks": self.get_mesh_landmarks,
             "backup_blend": self.backup_blend,
             "restore_blend": self.restore_blend,
+            "inspect_blend_file": self.inspect_blend_file,
+            "inspect_blend_object": self.inspect_blend_object,
+            "inspect_external_file": self.inspect_external_file,
             "get_edge_loops": self.get_edge_loops,
             "select_edge_loop": self.select_edge_loop,
             "select_edge_ring": self.select_edge_ring,
@@ -508,6 +512,186 @@ class BlenderMCPServer:
             raise Exception(f"No backup found at {backup_path}")
         bpy.ops.wm.open_mainfile(filepath=backup_path)
         return {"restored": True, "from": backup_path}
+
+    def inspect_blend_file(self, filepath):
+        """Read the contents of an external .blend file without importing anything.
+        Lists all objects, meshes, armatures, materials, etc."""
+        import os
+        if not os.path.isabs(filepath):
+            # Resolve relative to current .blend file directory
+            base = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+            filepath = os.path.join(base, filepath)
+        if not os.path.exists(filepath):
+            raise Exception(f"File not found: {filepath}")
+
+        data_block_types = [
+            "objects", "meshes", "armatures", "materials", "collections",
+            "cameras", "lights", "images", "textures", "actions",
+            "node_groups", "worlds",
+        ]
+        result = {"filepath": filepath, "data_blocks": {}}
+
+        with bpy.data.libraries.load(filepath) as (data_src, _data_dst):
+            for attr in data_block_types:
+                names = getattr(data_src, attr, [])
+                if names:
+                    result["data_blocks"][attr] = list(names)
+
+        # Summarize
+        result["summary"] = {k: len(v) for k, v in result["data_blocks"].items()}
+        return result
+
+    def inspect_blend_object(self, filepath, object_name):
+        """Read detailed info about a specific object from an external .blend file.
+        Temporarily links it, reads properties, then removes it. Does NOT modify the scene."""
+        import os
+        if not os.path.isabs(filepath):
+            base = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+            filepath = os.path.join(base, filepath)
+        if not os.path.exists(filepath):
+            raise Exception(f"File not found: {filepath}")
+
+        # Link the object temporarily
+        with bpy.data.libraries.load(filepath, link=True) as (data_src, data_dst):
+            if object_name not in data_src.objects:
+                raise Exception(f"Object '{object_name}' not found in {filepath}. "
+                                f"Available: {list(data_src.objects)}")
+            data_dst.objects = [object_name]
+
+        obj = data_dst.objects[0]
+        if obj is None:
+            raise Exception(f"Failed to load object '{object_name}'")
+
+        try:
+            info = {
+                "name": obj.name,
+                "type": obj.type,
+                "location": [round(v, 4) for v in obj.location],
+                "rotation_euler": [round(v, 4) for v in obj.rotation_euler],
+                "scale": [round(v, 4) for v in obj.scale],
+                "dimensions": [round(v, 4) for v in obj.dimensions],
+            }
+
+            if obj.type == 'MESH' and obj.data:
+                mesh = obj.data
+                info["mesh"] = {
+                    "vertex_count": len(mesh.vertices),
+                    "edge_count": len(mesh.edges),
+                    "polygon_count": len(mesh.polygons),
+                    "vertex_groups": [vg.name for vg in obj.vertex_groups] if obj.vertex_groups else [],
+                    "material_count": len(obj.data.materials),
+                    "materials": [m.name if m else None for m in obj.data.materials],
+                }
+
+            elif obj.type == 'ARMATURE' and obj.data:
+                armature = obj.data
+                bones_info = []
+                for bone in armature.bones:
+                    bones_info.append({
+                        "name": bone.name,
+                        "parent": bone.parent.name if bone.parent else None,
+                        "head": [round(v, 4) for v in bone.head_local],
+                        "tail": [round(v, 4) for v in bone.tail_local],
+                        "length": round(bone.length, 4),
+                        "connected": bone.use_connect,
+                        "deform": bone.use_deform,
+                    })
+                info["armature"] = {
+                    "bone_count": len(armature.bones),
+                    "bones": bones_info,
+                }
+
+            return info
+        finally:
+            # Clean up: remove linked data
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    def inspect_external_file(self, filepath):
+        """Inspect an external file (.fbx, .obj, .glb/.gltf) by importing to a
+        temporary collection, reading data, then deleting everything.
+        Returns object list with types, bone hierarchies, vertex counts, etc."""
+        import os
+        if not os.path.isabs(filepath):
+            base = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+            filepath = os.path.join(base, filepath)
+        if not os.path.exists(filepath):
+            raise Exception(f"File not found: {filepath}")
+
+        ext = os.path.splitext(filepath)[1].lower()
+
+        # Remember existing objects
+        existing_objects = set(o.name for o in bpy.data.objects)
+
+        # Create a temporary collection
+        temp_col = bpy.data.collections.new("_MCP_TEMP_INSPECT")
+        bpy.context.scene.collection.children.link(temp_col)
+
+        # Override context to import into temp collection
+        layer_col = bpy.context.view_layer.layer_collection.children[temp_col.name]
+        bpy.context.view_layer.active_layer_collection = layer_col
+
+        try:
+            if ext == '.fbx':
+                bpy.ops.import_scene.fbx(filepath=filepath)
+            elif ext == '.obj':
+                bpy.ops.wm.obj_import(filepath=filepath)
+            elif ext in ('.glb', '.gltf'):
+                bpy.ops.import_scene.gltf(filepath=filepath)
+            else:
+                raise Exception(f"Unsupported format: {ext}. Use .blend, .fbx, .obj, .glb, or .gltf")
+
+            # Read data from newly imported objects
+            new_objects = [o for o in bpy.data.objects if o.name not in existing_objects]
+            objects_info = []
+
+            for obj in new_objects:
+                obj_info = {
+                    "name": obj.name,
+                    "type": obj.type,
+                    "location": [round(v, 4) for v in obj.location],
+                    "dimensions": [round(v, 4) for v in obj.dimensions],
+                }
+
+                if obj.type == 'MESH' and obj.data:
+                    obj_info["vertex_count"] = len(obj.data.vertices)
+                    obj_info["polygon_count"] = len(obj.data.polygons)
+                    obj_info["materials"] = [m.name if m else None for m in obj.data.materials]
+                    obj_info["vertex_groups"] = [vg.name for vg in obj.vertex_groups]
+
+                elif obj.type == 'ARMATURE' and obj.data:
+                    bones = []
+                    for bone in obj.data.bones:
+                        bones.append({
+                            "name": bone.name,
+                            "parent": bone.parent.name if bone.parent else None,
+                            "head": [round(v, 4) for v in bone.head_local],
+                            "tail": [round(v, 4) for v in bone.tail_local],
+                            "connected": bone.use_connect,
+                        })
+                    obj_info["bone_count"] = len(bones)
+                    obj_info["bones"] = bones
+
+                elif obj.type == 'EMPTY':
+                    obj_info["empty_display_type"] = obj.empty_display_type
+
+                objects_info.append(obj_info)
+
+            result = {
+                "filepath": filepath,
+                "format": ext,
+                "object_count": len(objects_info),
+                "objects": objects_info,
+            }
+            return result
+
+        finally:
+            # Clean up: delete all imported objects and the temp collection
+            for obj in list(bpy.data.objects):
+                if obj.name not in existing_objects:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.collections.remove(temp_col)
+            # Purge orphan data
+            bpy.ops.outliner.orphans_purge(do_recursive=True)
 
     def execute_code(self, code):
         """Execute arbitrary Blender Python code"""

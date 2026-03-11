@@ -403,6 +403,71 @@ def get_mesh_landmarks(ctx: Context, mesh_name: str, num_height_samples: int = 1
         logger.error(f"Error getting mesh landmarks: {str(e)}")
         return f"Error getting mesh landmarks: {str(e)}"
 
+# ==================== File Inspection ====================
+
+@telemetry_tool("inspect_blend_file")
+@mcp.tool()
+def inspect_blend_file(ctx: Context, filepath: str) -> str:
+    """
+    Read the contents of an external .blend file WITHOUT importing anything.
+    Lists all data blocks: objects, meshes, armatures, materials, collections, etc.
+    Use this to see what's in a .blend file before deciding what to import.
+
+    Parameters:
+    - filepath: Path to the .blend file (absolute or relative to current file)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("inspect_blend_file", {"filepath": filepath})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error inspecting blend file: {str(e)}")
+        return f"Error inspecting blend file: {str(e)}"
+
+@telemetry_tool("inspect_blend_object")
+@mcp.tool()
+def inspect_blend_object(ctx: Context, filepath: str, object_name: str) -> str:
+    """
+    Read detailed info about a specific object from an external .blend file.
+    For meshes: vertex/edge/polygon counts, materials, vertex groups.
+    For armatures: full bone hierarchy with positions, parents, and properties.
+    Does NOT add anything to the current scene.
+
+    Parameters:
+    - filepath: Path to the .blend file
+    - object_name: Name of the object to inspect (from inspect_blend_file results)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("inspect_blend_object", {
+            "filepath": filepath,
+            "object_name": object_name,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error inspecting blend object: {str(e)}")
+        return f"Error inspecting blend object: {str(e)}"
+
+@telemetry_tool("inspect_external_file")
+@mcp.tool()
+def inspect_external_file(ctx: Context, filepath: str) -> str:
+    """
+    Inspect an external 3D file (.fbx, .obj, .glb, .gltf) without permanently
+    importing it. Temporarily imports to read data (objects, bones, meshes),
+    then deletes everything and purges orphan data. Returns object list with
+    types, bone hierarchies, vertex counts, materials, and vertex groups.
+
+    Parameters:
+    - filepath: Path to the file (.fbx, .obj, .glb, .gltf)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("inspect_external_file", {"filepath": filepath})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error inspecting external file: {str(e)}")
+        return f"Error inspecting external file: {str(e)}"
+
 # ==================== Backup / Restore ====================
 
 @telemetry_tool("backup_blend")
